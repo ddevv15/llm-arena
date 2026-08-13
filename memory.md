@@ -1,60 +1,57 @@
-# Memory — Arcjet protection + Prisma Postgres setup
+# Memory — Verifying feature #1, sign-in route, feature #2 decided (not yet built)
 
 Last updated: 2026-08-13
 
 ## What was built
 
-**Arcjet protection on `/api/chat`:**
-- `lib/arcjet.ts` — shared Arcjet client: `shield`, `detectBot`, `detectPromptInjection`, `tokenBucket` (capacity 20, refill 5 tokens/10s, keyed on `userId`)
-- `app/api/chat/route.ts` — calls `aj.protect()` after the existing Clerk auth check, before `streamText()`; latest user message checked for prompt injection; denials mapped to 429 (rate limit) / 400 (prompt injection) / 403 (bot/shield/other) via the existing `humanError()` helper
-- `ARCJET_KEY` added to `.env.local`, `.env.example`, and `lib/env.ts`'s required-vars list
-- Installed `@arcjet/next`
-- Arcjet site "llm-arena" already existed under the Personal team in Arcjet's console — reused rather than recreated
+**Per-call metrics on `/api/chat` (groundwork for scope.md feature #6, not the full feature):**
+- `lib/model-stream.ts` — `toModelSseResponse(result, requestStart)` now tracks `firstTokenAt` on the first `text-delta`, reads `outputTokens` off the `finish` part's `totalUsage`, and sends `{ outputTokens, ttft, tokensPerSecond }` on the `done` SSE event (was previously empty `{}`)
+- `app/api/chat/route.ts` — captures `requestStart = performance.now()` right before `streamText()` (after auth/parsing/Arcjet), so the metric times the model call only, not our own middleware overhead
+- `tokensPerSecond` is wall-clock throughput (`outputTokens / (finish − requestStart)`), deliberately not per-delta timing, since OpenRouter providers differ in whether they stream token-by-token or buffer-and-flush — delta timing would measure that difference instead of real model speed
+- No UI reads these fields yet
 
-**Prisma Postgres, end to end:**
-- Linked to existing Prisma Postgres database `db_cmsrf1uqb1qvfzrf6u11jy6u5` via `prisma postgres link` (CLI auth, not interactive) — `DATABASE_URL` written to `.env.local`
-- `prisma/schema.prisma` — `prisma-client` generator (output `../generated/prisma`), Prisma 7 style with **no `url` in the datasource block** (URL lives in `prisma.config.ts` instead)
-- `prisma.config.ts` — datasource URL from env, `migrations.seed: "tsx prisma/seed.ts"`
-- Starter schema: `User` ↔ `Post` (one-to-many) — explicitly a placeholder, not the real app data model
-- `prisma/migrations/20260813111720_init` applied
-- `lib/prisma.ts` — singleton `PrismaClient` with `PrismaPg` adapter, cached on `globalThis` in dev
-- `prisma/seed.ts` — seeds 2 users with posts; ran successfully via `prisma db seed`
-- `scripts/verify-prisma.ts` — confirms a live DB connection (`✅ Connected (found 2 users)`)
-- `DATABASE_URL` added to `.env.example`
-- `.gitignore` updated: `/generated/prisma` (build output) and `.env*` (already covered `.env`, confirmed `.env.local`/`.env` never tracked)
+**Sign-in route (to unblock manual verification of feature #1):**
+- `app/sign-in/[[...sign-in]]/page.tsx` — Clerk's `<SignIn />` on a dedicated catch-all route
+- `app/page.tsx` — rewritten from the create-next-app boilerplate to a minimal `Show`/`SignInButton`/`UserButton` toggle (Clerk Core 3 API — `@clerk/nextjs@7.7.4` replaced `SignedIn`/`SignedOut` with a single `Show when=` component; confirmed via Clerk's current docs, not assumed from training data)
+- `.env.local` and `.env.example` — added `NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in`, `NEXT_PUBLIC_CLERK_SIGN_IN_FALLBACK_REDIRECT_URL=/`, `NEXT_PUBLIC_CLERK_SIGN_UP_FALLBACK_REDIRECT_URL=/` so `SignInButton` redirects to our route instead of Clerk's hosted Account Portal
 
-**Environment setup:**
-- Homebrew `node@22` upgraded 22.17.1 → 22.23.2 (required by `@arcjet/next`'s Node minimum)
-- `package.json` gained a `pnpm.onlyBuiltDependencies` allowlist (`@prisma/client`, `@prisma/engines`, `esbuild`, `prisma`) so pnpm's build-script approval gate doesn't block Prisma's postinstall
+**`assets/docs/scope.md` updates:**
+- Table status for features #1 and #6 corrected from stale "not started" to "in progress" (they'd had real code behind them for a session already)
+- Feature #1's verify-by-hand line updated: confirmed live under a real signed-in session — Clerk auth resolved, Arcjet passed, `streamText` was called, and a real provider error (bad model id, testing mistake) was correctly caught and masked into the plain human-facing message. A successful model response hasn't been seen yet; decided not worth forcing a dedicated round for — will happen naturally once feature #5 (model picker) provides a real model id
+- Feature #6 gained two "Decided (ahead of the full feature)" notes documenting the Arcjet wiring and the per-call metrics groundwork, so a fresh conversation isn't surprised by code the scope didn't mention
 
 ## Decisions made
 
-- Arcjet is request-based (`@arcjet/next`), not guard-based, since `/api/chat` has a real HTTP `Request` object
-- Per-user token bucket keyed on `userId` (not IP) is what makes the rate limit shared across the three parallel per-model calls the arena UI will eventually make — this was the key design point from `scope.md` feature #6
-- Both `shield` (SQLi/XSS) and `detectPromptInjection` are wired in, since scope.md's wording ("shield against prompt injection") conflates two distinct Arcjet rules
-- Prisma `User`/`Post` schema is intentionally a generic starter, not the real data model. The real data model (users tied to Clerk, threads, per-model messages, votes) is still open — belongs to `scope.md` feature #3 and should go through `/architect`
+- Metrics (`ttft`/`tokensPerSecond`/`outputTokens`) belong on the existing `done` SSE event, not a new event type
+- `tokensPerSecond` = wall-clock throughput including TTFT, not generation-only speed — see reasoning above; this is a real trade-off (a slow-to-start model reads as slower on tok/s too) accepted because it's the only measure robust to provider buffering differences
+- Sign-in UI kept deliberately minimal (no app shell, no styling pass) — it exists only to unblock manual verification, not as feature #7's app shell, which is still fully open
+- Coding-standards doc (scope.md feature #2) will live in AGENTS.md's existing `## Rules` section, not a new separate file — avoids duplicating/drifting from what's already there
+- Pre-commit tooling will use `simple-git-hooks` + `lint-staged`, not `husky` — avoids the same pnpm build-script postinstall friction hit earlier with Prisma (`simple-git-hooks` needs one manual `pnpm exec simple-git-hooks` to register, no postinstall script)
 
 ## Problems solved
 
-- `npm install` failed with a cryptic `Cannot read properties of null` error — this project uses pnpm (`packageManager: pnpm@10.23.0`), not npm; switching fixed it
-- pnpm silently skipped Prisma's postinstall/build scripts (`Ignored build scripts: @prisma/engines, esbuild, prisma`) — fixed by adding `pnpm.onlyBuiltDependencies` to `package.json` and running `pnpm rebuild`
-- `@arcjet/next` requires Node `>=22.21.0`; local Node was `22.17.1` — upgraded via `brew upgrade node@22`
-- Prisma's public `llms-full.txt` doesn't document the `prisma postgres link` subcommand at all — confirmed it exists and got exact usage via `prisma postgres --help` instead of trusting training data
+- Confirmed `ai@7.0.62`'s `fullStream` `finish` part carries `totalUsage: LanguageModelUsage` (with `outputTokens`) by reading the actual type declarations — not assumed
+- Confirmed `@clerk/nextjs@7.7.4` is Clerk "Core 3" (via Clerk's own current docs, through context7), where `SignedIn`/`SignedOut` are replaced by `Show when="signed-in"|"signed-out"` — built the homepage against that, not older stale patterns
+- User got carried away pushing manual model-call testing (feature #6 territory) when only feature #1 verification was in scope — corrected mid-session, see feedback below
 
 ## Current state
 
-- Both features fully wired, verified, and passing lint + typecheck + `next build`
-- Arcjet: wiring confirmed via typecheck/build only — a live decision (e.g. hitting the 429 rate limit) has **not** been triggered yet, since `/api/chat` requires a signed-in Clerk session and there was no way to authenticate via `curl`. Needs manual verification through the browser once signed in.
-- Prisma: fully verified end-to-end, including a live DB read (`scripts/verify-prisma.ts`)
-- `scope.md` feature #6 (Arcjet) and feature #3 (data model) are still marked "not started" — this session's work is infrastructure underneath both, not the full feature build-out
+- Feature #1 (connecting to a model): effectively verified — signed-in auth → Arcjet → streamText → SSE error-masking all confirmed working live. Only a successful (non-error) model response is unseen, and that's intentionally deferred, not blocking.
+- Feature #6: still "not started" for its actual scope (parallel calls, voting, UI, PostHog funnel) — only two small pieces of groundwork (Arcjet, metrics) exist ahead of it, clearly logged as such in scope.md so they don't get mistaken for the real feature
+- Feature #2 (coding standards & tooling): approach fully decided and reported to the user, but building has **not** started — was mid-way through "report the decision, stop and wait" per AGENTS.md's workflow when the session ended. Decision recap: reuse AGENTS.md's `## Rules` as the conventions doc (add one caveat that "functional style over mutating loops" is review-enforced, not lint-enforced, since the SSE reader's `for await` loop is legitimate necessary imperative code); add Prettier (defaults already match existing code style — double quotes, semicolons, 2-space); add `simple-git-hooks` + `lint-staged` running `eslint --fix` + `prettier --write` on staged files only, no full build/typecheck in the hook
+- Lint already enforces `no-explicit-any`, `prefer-const`, `no-var` as errors via `eslint-config-next`'s flat config (confirmed via `eslint --print-config`) — AGENTS.md's "strict TS, no any, const" rules are already mechanically covered, this was a useful discovery that narrowed feature #2's actual remaining scope
+- Dev server was running on :3000 during this session (`pnpm dev` backgrounded to `/tmp/llm-arena-dev.log`) — likely not running anymore in a fresh session
 
 ## Next session starts with
 
-Two open threads, pick up either:
-1. **Arcjet manual verification** — sign in via browser, send ~25 rapid prompts to `/api/chat` to confirm the 429 actually fires, check `npx @arcjet/cli requests list --site-id site_01kzxbxd1ce4n8zxxb44qmaqxg`
-2. **scope.md update** — was about to ask the user whether to update `scope.md` to note Prisma/Arcjet infra is live, while leaving feature #3's real schema decision open for `/architect`. Awaiting their answer.
+Waiting on the user's go-ahead to actually build feature #2 as decided above:
+1. Add the honest caveat line to AGENTS.md's `## Rules` about functional style being review-enforced, not lint-enforced
+2. Install Prettier, add `.prettierrc` (matching existing defaults) + `.prettierignore`, add `format`/`format:check` scripts
+3. Install `simple-git-hooks` + `lint-staged`, configure pre-commit to run `eslint --fix` + `prettier --write` on staged files, register the hook
+4. Run lint/format/build to verify, then check off scope.md feature #2's two checklist items and flip its table status from "not started"
+
+If the user wants something else first, re-decide — don't assume feature #2 is still the priority without asking, per AGENTS.md's "report, stop, wait" workflow.
 
 ## Open questions
 
-- Should `scope.md` be updated now to reflect that Arcjet + Prisma Postgres infra is live, without marking features #3 or #6 as fully done (since the real data model and the rest of the parallel-streaming/voting feature aren't built yet)?
-- The real Prisma data model (users/threads/messages/votes per scope.md feature #3) is still undecided — needs an `/architect` pass before building
+- None blocking — just awaiting explicit go-ahead on feature #2's build step (already decided and reported, per this project's strict "decide → report → stop → wait for go-ahead, every feature, no exceptions" rule in AGENTS.md)
