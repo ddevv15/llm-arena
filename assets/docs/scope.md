@@ -18,12 +18,12 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 
 | #   | Feature                                     | Phase      | Status      |
 | --- | ------------------------------------------- | ---------- | ----------- |
-| 1   | Connecting to a model                       | Foundation | not started |
+| 1   | Connecting to a model                       | Foundation | in progress |
 | 2   | Coding standards & tooling                  | Foundation | not started |
 | 3   | Data model                                  | Foundation | not started |
 | 4   | Design & look                               | Foundation | not started |
 | 5   | Model picker                                | Slice 1    | not started |
-| 6   | Send a prompt, parallel streams, and voting | Slice 1    | not started |
+| 6   | Send a prompt, parallel streams, and voting | Slice 1    | in progress |
 | 7   | App shell & thread history                  | Slice 2    | not started |
 | 8   | Public thread visibility & sharing          | Slice 3    | not started |
 | 9   | Leaderboard: global & personal              | Slice 4    | not started |
@@ -38,8 +38,11 @@ Two real decisions still open once that exists: how the app calls OpenRouter to 
 
 PostHog should be wired in from the start too, session replay and heatmaps turned on, and tied to the signed-in user once Clerk resolves, so events are attached to a real person, not left anonymous.
 
-- [ ] Decide the approach
-- [ ] Write the spec
+Decided: the app calls OpenRouter through the Vercel AI SDK (`ai` + `@openrouter/ai-sdk-provider`), streaming on the plain Node runtime, no edge. Three models never share one connection, since that would make one dropping take the other two down with it, defeating the whole point of independent failure. `POST /api/chat` streams one model's answer at a time; the browser calls it three times in parallel, once per selected model, each with its own connection and its own reader. A follow-up just calls it again with that model's own growing message history. Enough Clerk to know who's asking is wired in now (`clerkMiddleware`, `ClerkProvider`, `auth()` gating the route); Prisma, Arcjet, and the rest of PostHog stay with their own features so this doesn't balloon into one untracked step.
+
+- [x] Decide the approach
+- [x] Build it: `lib/env.ts` (fail fast on missing vars), `lib/openrouter.ts`, `lib/model-stream.ts` (SSE framing: `chunk` / `error` / `done`, errors never leak the raw exception), `app/api/chat/route.ts`, `middleware.ts` + `ClerkProvider` in `app/layout.tsx`
+- [ ] Verify by hand: confirmed live under a real signed-in session — Clerk auth resolved, Arcjet passed, `streamText` was called, and a genuine provider error (bad model id) was caught and masked into the plain human message correctly. A successful model response hasn't been seen yet; not worth a dedicated round to force one, will happen naturally once feature #5 (model picker) gives a real model id to send.
 
 ### 2. Coding standards & tooling
 
@@ -77,7 +80,11 @@ The heart of the product. One prompt goes to every selected model at once, each 
 
 Arcjet sits in front of this endpoint before any model is ever called: rate limiting, bot protection, and a shield against prompt injection, plus a real limit on how much one person can use across all three models at once, not just a limit on the endpoint overall.
 
-Every prompt sent, every answer finishing, and every vote cast should be tracked as a real PostHog event, so there's an honest funnel from prompt to answer to vote. A model failing should also be logged properly on the server, not just shown to the user and forgotten. Separately from that funnel, every actual model call should also be wrapped so PostHog captures its own real tokens, cost, and latency per call, that's PostHog's own LLM analytics, not the same thing as the funnel events or the numbers already shown on the response card.
+Decided (Arcjet, ahead of the full feature): `lib/arcjet.ts` wires `shield`, `detectBot`, `detectPromptInjection`, and a `tokenBucket` (capacity 20, refill 5/10s) keyed on `userId` rather than IP, so the limit is shared across the three parallel per-model calls one prompt will eventually make, not per-connection. Wired into `app/api/chat/route.ts` after auth, before the model is called. Passes build/lint; the live 429 and prompt-injection denials have **not** been triggered by hand yet, needs a signed-in browser session sending rapid/adversarial prompts.
+
+Decided (per-call metrics, ahead of the full feature): `lib/model-stream.ts` now computes `ttft`, `outputTokens`, and `tokensPerSecond` and sends them on the `done` SSE event (`app/api/chat/route.ts` captures `requestStart` right before `streamText()`, after auth/Arcjet, so the number times the model only). `tokensPerSecond` is wall-clock throughput, `outputTokens / (finish − requestStart)`, not per-delta timing, since some OpenRouter providers stream token-by-token and others buffer-and-flush, and a delta-timing-based number would measure that difference instead of real model speed. Confirmed the fields exist and typecheck against `ai@7.0.62`; not yet verified by hand that the numbers look sane on a real streamed answer. No UI reads these yet.
+
+Prisma (data model) is separate and still fully open, see feature #3.
 
 - [ ] Decide the approach
 - [ ] Build it
