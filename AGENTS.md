@@ -20,7 +20,7 @@ There's no formal spec-file system here, no numbered acceptance criteria, no sep
 
 ## Rules
 
-- Functional style: pure functions by default, no shared mutable state, side effects pushed to the edges.
+- Functional style: pure functions by default, no shared mutable state, side effects pushed to the edges. This is review-enforced, not lint-enforced — a `for await` loop over a stream reader, for example, is legitimate necessary imperative code, not a violation.
 - Immutable data, `const` and `readonly`, prefer `map`/`filter`/`reduce` over mutating loops.
 - Folder by feature, not by shared layer-wide folders.
 - Strict TypeScript, no `any`.
@@ -31,6 +31,8 @@ There's no formal spec-file system here, no numbered acceptance criteria, no sep
 - Shared values, spacing, color, repeated UI patterns, live in `globals.css` or a shared component, never copy-pasted as raw Tailwind classes across files. If the same handful of classes show up in three places, that's a component, not a coincidence.
 - After building or changing anything, actually run it, typecheck, lint, and a real build, not just read the code and assume it's right. Fix whatever fails before calling the step done.
 - No test runner, no browser automation framework, for this project. Verify manually, a running dev server and a real browser, or something as light as `curl`. That's already decided, not something to add later, don't install one to check something works.
+
+`assets/docs/coding-standards.md` also exists, but it's a target document pasted in verbatim, ahead of what's actually built (it names tools, paths, and folder structure — `husky`, `docs/`, `infrastructure/`, `features/` — that aren't real yet). This `## Rules` section and `assets/docs/scope.md`'s feature #2 entry are the accurate record of what's actually enforced today; don't treat the coding-standards doc as current state until each piece is decided and built through its own feature.
 
 ## Design
 

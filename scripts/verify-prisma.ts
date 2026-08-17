@@ -6,8 +6,18 @@ const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL! });
 const prisma = new PrismaClient({ adapter });
 
 async function main() {
-  const userCount = await prisma.user.count();
-  console.log(`✅ Connected (found ${userCount} user${userCount === 1 ? "" : "s"})`);
+  const [userCount, threadCount, turnCount, answerCount, voteCount] =
+    await Promise.all([
+      prisma.user.count(),
+      prisma.thread.count(),
+      prisma.turn.count(),
+      prisma.modelAnswer.count(),
+      prisma.vote.count(),
+    ]);
+
+  console.log(
+    `✅ Connected (users: ${userCount}, threads: ${threadCount}, turns: ${turnCount}, answers: ${answerCount}, votes: ${voteCount})`,
+  );
 }
 
 main()
