@@ -19,12 +19,12 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 | #   | Feature                                     | Phase      | Status      |
 | --- | ------------------------------------------- | ---------- | ----------- |
 | 1   | Connecting to a model                       | Foundation | in progress |
-| 2   | Coding standards & tooling                  | Foundation | not started |
-| 3   | Data model                                  | Foundation | not started |
-| 4   | Design & look                               | Foundation | not started |
+| 2   | Coding standards & tooling                  | Foundation | done        |
+| 3   | Data model                                  | Foundation | done        |
+| 4   | Design & look                               | Foundation | done        |
 | 5   | Model picker                                | Slice 1    | not started |
 | 6   | Send a prompt, parallel streams, and voting | Slice 1    | in progress |
-| 7   | App shell & thread history                  | Slice 2    | not started |
+| 7   | App shell & thread history                  | Slice 2    | in progress |
 | 8   | Public thread visibility & sharing          | Slice 3    | not started |
 | 9   | Leaderboard: global & personal              | Slice 4    | not started |
 
@@ -44,26 +44,49 @@ Decided: the app calls OpenRouter through the Vercel AI SDK (`ai` + `@openrouter
 - [x] Build it: `lib/env.ts` (fail fast on missing vars), `lib/openrouter.ts`, `lib/model-stream.ts` (SSE framing: `chunk` / `error` / `done`, errors never leak the raw exception), `app/api/chat/route.ts`, `middleware.ts` + `ClerkProvider` in `app/layout.tsx`
 - [ ] Verify by hand: confirmed live under a real signed-in session — Clerk auth resolved, Arcjet passed, `streamText` was called, and a genuine provider error (bad model id) was caught and masked into the plain human message correctly. A successful model response hasn't been seen yet; not worth a dedicated round to force one, will happen naturally once feature #5 (model picker) gives a real model id to send.
 
+Hardened after a code review surfaced three gaps, ahead of the full feature:
+
+- **`lib/env.ts` was only lazy.** The read-on-first-access proxy let a route's first real request discover missing config instead of the server refusing to boot. Added `assertRequiredEnv()`, called once from a new root `instrumentation.ts`'s `register()` — Next.js runs that at real server startup (not during `next build`'s module analysis, confirmed via the framework's own instrumentation docs), so a missing var now crashes the process before it serves anything. Verified by hand: deleted `ARCJET_KEY` from `.env.local`, `pnpm dev` crashed immediately with the exact missing-var error; restored it, server came back up clean.
+- **`instrumentation-client.ts`'s PostHog init silently no-op'd in production** when config was missing (the throw only fired in development). Now it throws in every environment unless `NEXT_PUBLIC_POSTHOG_DISABLED=true` is set, an explicit, observable opt-out distinct from a misconfigured deploy. Documented in `.env.example`.
+- **`app/api/chat/route.ts` only screened the newest message for prompt injection**, but forwarded the whole conversation array to the model — an earlier message could carry an injection payload behind a benign final prompt and reach the model unscreened. Added a `.refine()` on the request schema requiring messages to strictly alternate starting and ending on `"user"` (so every real earlier turn is unambiguous), and a second, lean Arcjet client (`ajPromptInjection` in `lib/arcjet.ts`, prompt-injection rule only, no `tokenBucket`) that screens every earlier user message in parallel, on top of the existing full `aj.protect()` screen on the newest one — so the per-conversation rate-limit budget still only spends once per request. Verified by hand: a standalone schema check confirmed 6 cases (valid single/multi-turn accepted; wrong-role-first, two user turns in a row, and ending on assistant all rejected).
+- **`model` accepted any string**, letting an authenticated caller request a paid OpenRouter model under this app's key. Added `lib/models.ts`: `FREE_MODEL_IDS`, hand-filtered from a live `GET /api/v1/models` fetch to $0 pricing and text-output models only, and the request schema now uses `z.enum(FREE_MODEL_IDS)` instead of a bare string. Feature #5's live picker should apply this exact same filter so the two can't drift apart.
+
 ### 2. Coding standards & tooling
 
 Write down the real conventions for this project once it actually exists, then install linting, formatting, and a pre-commit hook that actually enforces them.
 
-- [ ] Decide the approach
-- [ ] Install lint, format, and whatever else is needed, and write it up in a coding-standards doc
+Decided: conventions live in `AGENTS.md`'s existing `## Rules` section rather than a new doc, to avoid duplicating/drifting from what's already there — added one caveat that "functional style over mutating loops" is review-enforced, not lint-enforced (a `for await` loop over a stream reader is legitimate imperative code). Lint already covers `no-explicit-any`, `prefer-const`, `no-var` as errors via `eslint-config-next`'s flat config (confirmed with `eslint --print-config`), so AGENTS.md's strict-TS rules were already mechanically enforced before this feature. Added Prettier with default settings (already matched the existing code style — double quotes, semicolons, 2-space indent). Pre-commit uses `simple-git-hooks` + `lint-staged` (`eslint --fix` + `prettier --write` on staged files only, no full build/typecheck in the hook) rather than `husky`, to avoid the pnpm build-script postinstall friction hit earlier with Prisma — `simple-git-hooks` needs one manual `pnpm exec simple-git-hooks` to register, which was run once; the hook writes to `.git/hooks/pre-commit` locally and isn't tracked by git, so anyone who clones the repo needs to run that same command once after `pnpm install`.
+
+- [x] Decide the approach
+- [x] Install lint, format, and whatever else is needed, and write it up in a coding-standards doc: `.prettierrc`, `.prettierignore`, `format`/`format:check` scripts, `simple-git-hooks` + `lint-staged` config in `package.json`, hook registered and verified live on real staged files; lint, format:check, `tsc --noEmit`, and `next build` all pass
+
+**Note (not yet reconciled):** `assets/docs/coding-standards.md` also exists, pasted in verbatim at the user's request as a target document. It describes a stricter, more built-out setup than the two paragraphs above — `husky` instead of `simple-git-hooks`, a `docs/` path instead of `assets/docs/`, an `infrastructure/`/`features/` folder layering with `no-restricted-imports` walls, `prettier-plugin-tailwindcss`, a `console.log`-fails-build rule, and other ESLint rules none of which are actually configured yet. Treat it as a future direction, not the current state, until each piece is actually decided and built through its own feature (mainly #3 onward, once real feature folders exist) — the two paragraphs above remain the accurate record of what feature #2 actually shipped.
 
 ### 3. Data model
 
 The core things every feature depends on: users tied to Clerk, threads, each model's own messages inside a thread, and votes. A vote should only ever be possible on a turn where two or more models actually answered.
 
-- [ ] Decide the approach
-- [ ] Build it
+Decided: `User` → `Thread` → `Turn` → `ModelAnswer`, plus `Vote`. `User.id` is Clerk's own user id directly, no separate internal id or profile cache, since nothing in the app ever displays another user's profile (the leaderboards rank models, not people). `Thread` has no visibility/privacy column — feature #8 already treats threads as link-accessible by default. `Turn` is one row per prompt (named `Turn`, not `Message`, since one prompt fans out to several models' answers at once). `ModelAnswer` carries `status` (`STREAMING`/`COMPLETE`/`ERROR`) and the same `ttft`/`tokensPerSecond`/`outputTokens` feature #1's groundwork already computes, so a follow-up can reconstruct each model's own growing history independently. `Vote.turnId` is `@unique` (DB-level: no double-voting on a turn) and `Vote.answerId` is `@unique` too (an answer can win at most one vote, required by Prisma to make `ModelAnswer.wonVote` a proper one-to-one). The "needs 2+ answered models" rule is application code on the future insert path, not a DB constraint — Postgres can't express "count of sibling rows ≥ 2" declaratively without a trigger, not worth it for one legitimate insert path.
+
+Scope boundary: schema + migration only, no application code calls Prisma yet — wiring real `prisma.turn.create()` / the vote insert path into the streaming flow is feature #6's job, same pattern as #1 building Arcjet/metrics ahead of #6 without wiring them in.
+
+- [x] Decide the approach
+- [x] Build it: `prisma/schema.prisma` rewritten (starter `User`/`Post` replaced), migration `20260813192045_core_data_model` generated via `prisma migrate diff` + applied via `prisma migrate deploy` (the interactive `migrate dev` path isn't available non-interactively), Prisma client regenerated. `prisma/seed.ts` now seeds one demo user/thread/turn/two answers/one vote to exercise the full graph, `scripts/verify-prisma.ts` counts all five models. Verified by hand: seed ran clean against the real Postgres DB, verify script confirmed `users: 3, threads: 1, turns: 1, answers: 2, votes: 1` (3 users because 2 stale `email`/`name`-stripped rows survived the migration from the old Alice/Bob starter seed — harmless, no threads reference them, left in place since deleting them needs a direct go-ahead). Lint, typecheck, and `next build` all pass.
 
 ### 4. Design & look
 
 A coffee or dark brown background, warm, not neutral gray or true black. One accent color, rust, used only for things you interact with, buttons, links, focus states, the win-rate bar, never as decoration. Because the background and the accent are both warm tones from the same family, the accent has to stay clearly brighter and more saturated than the background, enough that a button never blends into the page behind it, that's a real risk with two warm colors this close and worth checking by eye, not just by the numbers. Blue, indigo, and purple are never the accent, under any circumstance. Green is reserved only for marking a winner, red only for errors, never reused for anything else. Contrast should genuinely hold up in both light and dark mode, not just look fine at a glance.
 
-- [ ] Decide the approach
-- [ ] Build it
+Decided: the whole app leans into an honest-ledger register, not a generic AI-startup look, because the one thing this product actually promises is real, unmanufactured numbers (including a $0.0000 cost line that's true, not a bug). That idea becomes the page's signature: every answer panel ends in a small receipt-style footer, monospace, dotted leaders between label and value (`tokens/s ..... 42`, `cost ..... $0.0000`), styled like a printed ticket stub rather than a stat card. Three model panels sit side by side on desktop (they answer in parallel, not in sequence, so no numbered 01/02/03 markers anywhere), stacking on mobile with the receipt footer as the last thing to "print in" once a panel finishes streaming, that's the one deliberate motion beat, everything else stays quiet, no hover confetti, no gradient hero.
+
+Type: a warm slab serif with real character, Fraunces, carries the app name and the model-name headers on each panel, used sparingly, not for body text. Body copy runs in a humanist grotesk, Schibsted Grotesk, warmer and less clinical than the default Inter reach. Every number, anywhere, uses a monospace face, IBM Plex Mono, tokens/sec, ttft, cost, timestamps, so three models' figures actually line up in a column a person can compare at a glance.
+
+Color tokens, dark mode: background `#241811`, card surface `#2E2015`, text `#F1E6D8`, rust accent `#C1652D`, winner green `#5B8A52`, error red `#D0362B`. Light mode is not a plain white flip, same paper: background `#EFE3D3` (warm parchment, not cream-#F4F1EA-default), card surface `#F7EEE0`, text `#2A1B10`, accent deepened to `#A8501E` to hold contrast on the lighter paper, green and red unchanged. Rust and red are kept clearly separate hues (rust reads orange, red reads red) so a losing-error state is never mistaken for the accent color at a glance.
+
+Components: shadcn stays the library, but corners stay closer to sharp than rounded (4px radius, not the pill-shaped default), dividers are hairlines or the same dotted-leader motif as the receipt footer, no drop shadows or glassmorphism, flat and paper-like throughout.
+
+- [x] Decide the approach
+- [x] Build it: tokens wired into `app/globals.css` as CSS variables (`.dark` class + `next-themes`, `attribute="class"` `defaultTheme="system"`, so it follows the OS by default and a manual toggle can be added later without a rework), `--radius: 0.25rem`. Fonts wired into `app/layout.tsx` via `next/font/google`: Fraunces (`--font-display`), Schibsted Grotesk (`--font-sans`), IBM Plex Mono (`--font-mono`). shadcn initialized (`components.json`, `lib/utils.ts`), `button`/`card`/`badge` added as the base primitives. `components/receipt-footer.tsx` built as the shared signature component (dotted-leader label/value rows in mono), consumed via a `rows` prop so feature #6 can hand it real `tokens/s`/`ttft`/`cost` figures directly. Verified by hand: rendered a throwaway `/design-preview` route with real 3-panel content, screenshotted both light and dark via Playwright (OS `prefers-color-scheme` emulation, no manual toggle exists yet), confirmed the rust accent holds contrast against both the parchment and coffee backgrounds and the receipt footer's columns actually line up, then deleted the route, it wasn't a real feature page. Lint, typecheck, and `next build` all pass.
 
 ## Slice 1: Core arena loop
 
@@ -95,8 +118,14 @@ Prisma (data model) is separate and still fully open, see feature #3.
 
 The frame everything else sits inside: a top bar and sidebar that stay in place while the page scrolls, the thread's name, and each model's win record shown right there (shrinking down to a small dot and number if it gets crowded). The sidebar lists a signed-in user's own past threads so the tool actually feels usable across visits, not just in one sitting.
 
-- [ ] Decide the approach
-- [ ] Build it
+Decided (UI only, ahead of the full feature): built the frame with placeholder thread/win-record data, since the real thread list (feature #7's own data wiring), model catalog (#5), and streaming/voting (#6) don't exist yet. `components/app-shell.tsx` — sidebar (wordmark, "New thread" button, thread list, active thread marked with a rust left-rule rather than a filled pill, consistent with the ledger identity from feature #4) is a fixed column on `md`+ and an off-canvas drawer below it, opened by a top-bar menu button, closed by backdrop click or Escape, with focus moved to the drawer's close button on open and back to the menu button on close. Top bar shows the thread name plus each model's win record as small mono chips (`Claude Sonnet 5 · 5`); below `sm` those collapse to a dot-and-number chip per model, per the brief. Win-record chips deliberately use neutral secondary styling, not green, since scope.md reserves green for marking a single turn's winner, not a running tally. `app/page.tsx`'s signed-in branch now renders inside `AppShell`; signed-out keeps feature #1's original minimal sign-in prompt, no shell, nothing to show pre-auth. Main content area is a placeholder "ask three models" message with a disabled button, feature #6's real prompt composer replaces it.
+
+Scope boundary: no real routing yet, sidebar thread links point at `/thread/[id]` hrefs that don't resolve to a real page, that's feature #7's own remaining data-wiring work (or #6/#8), not built here.
+
+**Open note:** user flagged the built UI as not good on sight, needs a real design pass before this is considered finished. Deliberately deferred, not forgotten, feature-list work (#5/#6) takes priority for now. Don't treat #4 or #7 as visually settled in a fresh conversation.
+
+- [x] Decide the approach
+- [x] Build it: verified by hand on a throwaway unauthenticated preview route (`AppShell` rendered directly, bypassing the Clerk gate) — screenshotted light and dark at desktop width (sidebar, active-thread highlight, full win-record chips all correct in both) and at a 390px mobile width (sidebar hidden, win chips collapsed to dots, hamburger present). Opened the mobile drawer, confirmed the backdrop and content render correctly, then confirmed Escape closes it and returns focus to the menu button. Deleted the preview route afterward. Lint, format, typecheck (via `next build`'s own TypeScript pass), and `next build` all pass.
 
 ## Slice 3: Public visibility & sharing
 
