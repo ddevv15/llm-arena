@@ -7,20 +7,82 @@ datasource db {
   provider = "postgresql"
 }
 
-// Starter models — replace with your own
+// `id` is the Clerk user id directly — Clerk already owns identity, and every
+// write path already has `userId` from `auth()`, so there's no separate
+// internal id or profile cache to keep in sync.
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  posts     Post[]
+  id        String   @id
   createdAt DateTime @default(now())
+  threads   Thread[]
+  votes     Vote[]
 }
 
-model Post {
+model Thread {
   id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
   title     String
-  content   String?
-  author    User     @relation(fields: [authorId], references: [id])
-  authorId  String
   createdAt DateTime @default(now())
+  turns     Turn[]
+
+  @@index([userId])
+}
+
+// One prompt sent into a thread. Named `Turn`, not `Message`, because one
+// prompt fans out into several models' answers at once — it's a round, not
+// a single item.
+model Turn {
+  id        String        @id @default(cuid())
+  threadId  String
+  thread    Thread        @relation(fields: [threadId], references: [id])
+  prompt    String
+  createdAt DateTime      @default(now())
+  answers   ModelAnswer[]
+  vote      Vote?
+
+  @@index([threadId])
+}
+
+enum AnswerStatus {
+  STREAMING
+  COMPLETE
+  ERROR
+}
+
+// One model's answer within a turn. `ttft` / `tokensPerSecond` /
+// `outputTokens` mirror what `lib/model-stream.ts` already computes per call
+// (feature #1); persisting them here is what the leaderboard (feature #9)
+// will aggregate.
+model ModelAnswer {
+  id              String       @id @default(cuid())
+  turnId          String
+  turn            Turn         @relation(fields: [turnId], references: [id])
+  model           String
+  status          AnswerStatus @default(STREAMING)
+  content         String       @default("")
+  ttft            Float?
+  tokensPerSecond Float?
+  outputTokens    Int?
+  createdAt       DateTime     @default(now())
+  wonVote         Vote?
+
+  @@index([turnId])
+}
+
+// A vote needs two or more answered models on its turn — that rule is
+// application code (the one insert path), not a database constraint,
+// since Postgres can't express "count of sibling rows >= 2" declaratively
+// without a trigger. `turnId` being unique is the one thing the database
+// does guarantee on its own: no double-voting on a turn.
+model Vote {
+  id        String      @id @default(cuid())
+  turnId    String      @unique
+  turn      Turn        @relation(fields: [turnId], references: [id])
+  userId    String
+  user      User        @relation(fields: [userId], references: [id])
+  answerId  String      @unique
+  answer    ModelAnswer @relation(fields: [answerId], references: [id])
+  createdAt DateTime    @default(now())
+
+  @@index([userId])
 }
