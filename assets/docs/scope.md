@@ -22,7 +22,7 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 | 2   | Coding standards & tooling                  | Foundation | done        |
 | 3   | Data model                                  | Foundation | done        |
 | 4   | Design & look                               | Foundation | done        |
-| 5   | Model picker                                | Slice 1    | not started |
+| 5   | Model picker                                | Slice 1    | done        |
 | 6   | Send a prompt, parallel streams, and voting | Slice 1    | in progress |
 | 7   | App shell & thread history                  | Slice 2    | in progress |
 | 8   | Public thread visibility & sharing          | Slice 3    | not started |
@@ -94,8 +94,10 @@ Components: shadcn stays the library, but corners stay closer to sharp than roun
 
 An "Add model" popover pulling OpenRouter's live free-tier list, sorted by context window, capped at three models, defaulting to all three selected, with removable chips next to the prompt box. Also render that same catalog as a simple `/models` page, name, context window, and pricing for each one, so anyone can browse the full list without opening the picker.
 
-- [ ] Decide the approach
-- [ ] Build it
+Decided: `lib/model-catalog.ts` fetches OpenRouter's live `GET /v1/models` server-side (cached an hour via Next's fetch `revalidate`, the catalog doesn't change minute to minute), filtered down to the existing `FREE_MODEL_IDS` allowlist from feature #1's hardening pass rather than a second live pricing check, so the picker and the route that actually calls a model can never drift apart. `app/page.tsx` became a server component so it can fetch that catalog and hand it to a new `components/home-content.tsx` client component holding the sign-in/shell logic, no dedicated public API route needed just for this. `components/model-picker.tsx` holds selection state only in memory (nothing to persist it to until feature #6's real Thread exists), defaults to the top three models by context window, capped at three, removable chips, an "Add model" shadcn Popover for the rest of the catalog, disables itself and reads "3/3 selected" once full rather than just vanishing. `app/models/page.tsx` is a standalone public page, not gated behind sign-in or wrapped in the app shell, a plain table of name/context/price, price always honestly `$0.0000`.
+
+- [x] Decide the approach
+- [x] Build it: verified by hand — `/models` renders the real live OpenRouter catalog (16 models, correctly filtered and sorted by context window). The picker verified on a throwaway unauthenticated preview route: defaults to the top three real models selected, "Add model" correctly disabled at the cap, removing a chip re-enables it, the popover lists the right remaining models sorted by context window, selecting one re-adds the chip and the cap re-engages. Lint, typecheck, and `next build` all pass; `/` and `/models` both statically prerender with the 1h revalidate as expected.
 
 ### 6. Send a prompt, parallel streams, and voting
 
