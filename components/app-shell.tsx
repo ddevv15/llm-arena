@@ -37,6 +37,11 @@ export function AppShell({
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
+  const closeNav = () => {
+    setMobileNavOpen(false);
+    menuButtonRef.current?.focus();
+  };
+
   useEffect(() => {
     if (!mobileNavOpen) {
       return;
@@ -46,8 +51,7 @@ export function AppShell({
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setMobileNavOpen(false);
-        menuButtonRef.current?.focus();
+        closeNav();
       }
     };
 
@@ -75,7 +79,7 @@ export function AppShell({
               type="button"
               aria-label="Close navigation"
               className="absolute inset-0 bg-foreground/40"
-              onClick={() => setMobileNavOpen(false)}
+              onClick={closeNav}
             />
             <Sidebar
               threads={threads}
@@ -87,7 +91,7 @@ export function AppShell({
                   variant="ghost"
                   size="icon"
                   aria-label="Close navigation"
-                  onClick={() => setMobileNavOpen(false)}
+                  onClick={closeNav}
                 >
                   <X className="size-4" />
                 </Button>

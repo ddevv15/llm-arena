@@ -6,6 +6,12 @@ import { FREE_MODEL_IDS } from "@/lib/models";
 import { openrouter } from "@/lib/openrouter";
 import { toModelSseResponse } from "@/lib/model-stream";
 
+// Every earlier user turn gets its own prompt-injection screen below, in
+// parallel and outside the request's own rate-limit bucket — this caps the
+// conversation so that fan-out (and the request's latency and screening
+// quota) stays bounded, not just its shape.
+const MAX_MESSAGES = 20;
+
 const requestSchema = z
   .object({
     model: z.enum(FREE_MODEL_IDS),
@@ -16,7 +22,8 @@ const requestSchema = z
           content: z.string().min(1),
         }),
       )
-      .min(1),
+      .min(1)
+      .max(MAX_MESSAGES),
   })
   .refine(
     (data) =>
