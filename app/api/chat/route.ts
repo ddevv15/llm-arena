@@ -9,8 +9,11 @@ import { toModelSseResponse } from "@/lib/model-stream";
 // Every earlier user turn gets its own prompt-injection screen below, in
 // parallel and outside the request's own rate-limit bucket — this caps the
 // conversation so that fan-out (and the request's latency and screening
-// quota) stays bounded, not just its shape.
-const MAX_MESSAGES = 20;
+// quota) stays bounded, not just its shape. Odd, to match the alternating
+// refine below (starts and ends on "user"): an even bound would reject the
+// boundary case it's meant to allow, since a valid conversation of that
+// length always ends on "assistant".
+const MAX_MESSAGES = 19;
 
 const requestSchema = z
   .object({
