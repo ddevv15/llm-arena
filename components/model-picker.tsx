@@ -42,6 +42,14 @@ export function ModelPicker({ catalog }: ModelPickerProps) {
   );
   const isFull = selectedIds.length >= MAX_SELECTED;
 
+  if (catalog.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Models are unavailable right now. Try again shortly.
+      </p>
+    );
+  }
+
   const addModel = (id: FreeModelId) => {
     if (isFull) {
       return;
