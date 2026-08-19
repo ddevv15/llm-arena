@@ -8,8 +8,7 @@ import {
   type ModelRecord,
   type ThreadSummary,
 } from "@/components/app-shell";
-import { ModelPicker } from "@/components/model-picker";
-import { Button } from "@/components/ui/button";
+import { Arena } from "@/components/arena";
 import type { CatalogModel } from "@/lib/model-catalog";
 
 const PLACEHOLDER_THREADS: ThreadSummary[] = [
@@ -77,19 +76,7 @@ export function HomeContent({ catalog }: HomeContentProps) {
           threads={PLACEHOLDER_THREADS}
           activeThreadId={PLACEHOLDER_THREADS[0].id}
         >
-          <div className="mx-auto flex max-w-3xl flex-col items-center gap-4 px-4 py-16 text-center">
-            <h2 className="font-display text-2xl font-medium">
-              Ask three models at once
-            </h2>
-            <p className="max-w-prose text-muted-foreground">
-              The prompt box and side-by-side answers land with feature #6. This
-              is the frame they&apos;ll sit inside.
-            </p>
-            <ModelPicker catalog={catalog} />
-            <Button disabled className="mt-2">
-              Ask three models
-            </Button>
-          </div>
+          <Arena catalog={catalog} />
         </AppShell>
       </Show>
     </>

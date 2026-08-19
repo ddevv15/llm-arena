@@ -26,12 +26,15 @@ function formatContextLength(contextLength: number): string {
 
 type ModelPickerProps = {
   catalog: CatalogModel[];
+  selectedIds: FreeModelId[];
+  onChange: (selectedIds: FreeModelId[]) => void;
 };
 
-export function ModelPicker({ catalog }: ModelPickerProps) {
-  const [selectedIds, setSelectedIds] = useState<FreeModelId[]>(() =>
-    catalog.slice(0, MAX_SELECTED).map((model) => model.id),
-  );
+export function ModelPicker({
+  catalog,
+  selectedIds,
+  onChange,
+}: ModelPickerProps) {
   const [popoverOpen, setPopoverOpen] = useState(false);
 
   const selectedModels = selectedIds
@@ -54,12 +57,12 @@ export function ModelPicker({ catalog }: ModelPickerProps) {
     if (isFull) {
       return;
     }
-    setSelectedIds((current) => [...current, id]);
+    onChange([...selectedIds, id]);
     setPopoverOpen(false);
   };
 
   const removeModel = (id: FreeModelId) => {
-    setSelectedIds((current) => current.filter((selected) => selected !== id));
+    onChange(selectedIds.filter((selected) => selected !== id));
   };
 
   return (

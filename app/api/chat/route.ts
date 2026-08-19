@@ -1,44 +1,16 @@
 import { auth } from "@clerk/nextjs/server";
+import type { ModelMessage } from "ai";
 import { streamText } from "ai";
 import { z } from "zod";
-import { aj, ajPromptInjection } from "@/lib/arcjet";
-import { FREE_MODEL_IDS } from "@/lib/models";
+import { isFreeModel } from "@/lib/models";
 import { openrouter } from "@/lib/openrouter";
 import { toModelSseResponse } from "@/lib/model-stream";
+import { prisma } from "@/lib/prisma";
 
-// Every earlier user turn gets its own prompt-injection screen below, in
-// parallel and outside the request's own rate-limit bucket — this caps the
-// conversation so that fan-out (and the request's latency and screening
-// quota) stays bounded, not just its shape. Odd, to match the alternating
-// refine below (starts and ends on "user"): an even bound would reject the
-// boundary case it's meant to allow, since a valid conversation of that
-// length always ends on "assistant".
-const MAX_MESSAGES = 19;
-
-const requestSchema = z
-  .object({
-    model: z.enum(FREE_MODEL_IDS),
-    messages: z
-      .array(
-        z.object({
-          role: z.enum(["user", "assistant"]),
-          content: z.string().min(1),
-        }),
-      )
-      .min(1)
-      .max(MAX_MESSAGES),
-  })
-  .refine(
-    (data) =>
-      data.messages.length % 2 === 1 &&
-      data.messages.every(
-        (message, index) =>
-          message.role === (index % 2 === 0 ? "user" : "assistant"),
-      ),
-    {
-      message: "Messages must alternate, starting and ending with the user.",
-    },
-  );
+const requestSchema = z.object({
+  turnId: z.string().min(1),
+  answerId: z.string().min(1),
+});
 
 const humanError = (message: string, status: number) =>
   Response.json({ error: message }, { status });
@@ -55,57 +27,91 @@ export async function POST(request: Request) {
     return humanError("That prompt couldn't be sent. Try again.", 400);
   }
 
-  const { model, messages } = parsed.data;
-  const latestUserMessage = messages[messages.length - 1].content;
+  const { turnId, answerId } = parsed.data;
 
-  const decision = await aj.protect(request, {
-    userId,
-    requested: 1,
-    detectPromptInjectionMessage: latestUserMessage,
+  const answer = await prisma.modelAnswer.findUnique({
+    where: { id: answerId },
+    select: {
+      model: true,
+      status: true,
+      turn: {
+        select: {
+          id: true,
+          prompt: true,
+          threadId: true,
+          createdAt: true,
+          thread: { select: { userId: true } },
+        },
+      },
+    },
   });
 
-  if (decision.isDenied()) {
-    if (decision.reason.isRateLimit()) {
-      return humanError(
-        "You're sending prompts faster than we can keep up. Wait a moment and try again.",
-        429,
-      );
-    }
-    if (decision.reason.isPromptInjection()) {
-      return humanError(
-        "That prompt couldn't be sent. Try rephrasing it.",
-        400,
-      );
-    }
-    return humanError("That prompt couldn't be sent. Try again.", 403);
+  if (
+    !answer ||
+    answer.turn.id !== turnId ||
+    answer.turn.thread.userId !== userId
+  ) {
+    return humanError("That turn couldn't be found.", 404);
   }
 
-  // The alternating-roles check above guarantees every earlier user turn
-  // sits at an even index below the last one; each of those still reaches
-  // the model and needs its own injection screen, not just the newest turn.
-  const earlierUserMessages = messages
-    .slice(0, -1)
-    .filter((message) => message.role === "user")
-    .map((message) => message.content);
+  if (answer.status !== "STREAMING") {
+    return humanError("This model has already answered this turn.", 409);
+  }
 
-  const earlierDecisions = await Promise.all(
-    earlierUserMessages.map((content) =>
-      ajPromptInjection.protect(request, {
-        userId,
-        detectPromptInjectionMessage: content,
-      }),
-    ),
+  if (!isFreeModel(answer.model)) {
+    return humanError("That model isn't available anymore.", 400);
+  }
+
+  // Each model continues its own conversation: only turns where *this* model
+  // completed an answer count toward its history, so one model erroring on a
+  // turn doesn't leave a gap the others don't also have to work around.
+  const earlierTurns = await prisma.turn.findMany({
+    where: {
+      threadId: answer.turn.threadId,
+      createdAt: { lt: answer.turn.createdAt },
+    },
+    orderBy: { createdAt: "asc" },
+    select: {
+      prompt: true,
+      answers: {
+        where: { model: answer.model, status: "COMPLETE" },
+        select: { content: true },
+        take: 1,
+      },
+    },
+  });
+
+  const messages: ModelMessage[] = earlierTurns.flatMap((turn) =>
+    turn.answers[0]
+      ? [
+          { role: "user" as const, content: turn.prompt },
+          { role: "assistant" as const, content: turn.answers[0].content },
+        ]
+      : [],
   );
-
-  if (earlierDecisions.some((d) => d.isDenied())) {
-    return humanError("That prompt couldn't be sent. Try rephrasing it.", 400);
-  }
+  messages.push({ role: "user", content: answer.turn.prompt });
 
   const requestStart = performance.now();
   const result = streamText({
-    model: openrouter().chat(model),
+    model: openrouter().chat(answer.model),
     messages,
   });
 
-  return toModelSseResponse(result, requestStart);
+  return toModelSseResponse(result, requestStart, {
+    onSettled: async (outcome) => {
+      await prisma.modelAnswer.update({
+        where: { id: answerId },
+        data:
+          outcome.status === "COMPLETE"
+            ? {
+                status: "COMPLETE",
+                content: outcome.content,
+                ttft: outcome.ttft,
+                tokensPerSecond: outcome.tokensPerSecond,
+                outputTokens: outcome.outputTokens,
+              }
+            : { status: "ERROR" },
+      });
+    },
+  });
 }
