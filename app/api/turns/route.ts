@@ -56,6 +56,35 @@ export async function POST(request: Request) {
     return humanError("That prompt couldn't be sent. Try again.", 403);
   }
 
+  // Fail closed where an error is visible — but this is best effort, not a
+  // guarantee, and the difference was measured rather than assumed.
+  //
+  // With Arcjet pointed at an unreachable address, most requests came back
+  // `conclusion: ALLOW` with every rule reporting ALLOW, prompt injection
+  // included, which plainly could not have run. No error surfaced anywhere on
+  // the decision: not on `isErrored()`, not on any per-rule result. So an
+  // outage is, in that mode, indistinguishable from a clean pass, and no code
+  // here can close that gap.
+  //
+  // What this does catch is the error Arcjet *does* report — a timed-out or
+  // refused decision — and on this route that is worth a 503 rather than a
+  // silent pass, because it is where a prompt enters the system, gets written
+  // down, and reaches a model. The public read page makes the opposite call.
+  //
+  // The real defence against the silent case is upstream: `aj` is given a
+  // deadline long enough that ordinary latency never lands here. See the note
+  // on `WRITE_DECISION_TIMEOUT_MS` — before that, this branch was rejecting
+  // roughly half of all prompts on latency alone.
+  if (decision.isErrored()) {
+    console.error("Arcjet decision errored on a turn write", {
+      message: decision.reason.message,
+    });
+    return humanError(
+      "That prompt couldn't be sent right now. Try again in a moment.",
+      503,
+    );
+  }
+
   if (threadId) {
     const thread = await prisma.thread.findUnique({
       where: { id: threadId },
