@@ -10,9 +10,10 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import type { CatalogModel } from "@/lib/model-catalog";
-import type { FreeModelId } from "@/lib/models";
-
-const MAX_SELECTED = 3;
+import {
+  MAX_SELECTED_MODELS as MAX_SELECTED,
+  type FreeModelId,
+} from "@/lib/models";
 
 function formatContextLength(contextLength: number): string {
   if (contextLength >= 1_000_000) {
@@ -26,12 +27,15 @@ function formatContextLength(contextLength: number): string {
 
 type ModelPickerProps = {
   catalog: CatalogModel[];
+  selectedIds: FreeModelId[];
+  onChange: (selectedIds: FreeModelId[]) => void;
 };
 
-export function ModelPicker({ catalog }: ModelPickerProps) {
-  const [selectedIds, setSelectedIds] = useState<FreeModelId[]>(() =>
-    catalog.slice(0, MAX_SELECTED).map((model) => model.id),
-  );
+export function ModelPicker({
+  catalog,
+  selectedIds,
+  onChange,
+}: ModelPickerProps) {
   const [popoverOpen, setPopoverOpen] = useState(false);
 
   const selectedModels = selectedIds
@@ -54,12 +58,12 @@ export function ModelPicker({ catalog }: ModelPickerProps) {
     if (isFull) {
       return;
     }
-    setSelectedIds((current) => [...current, id]);
+    onChange([...selectedIds, id]);
     setPopoverOpen(false);
   };
 
   const removeModel = (id: FreeModelId) => {
-    setSelectedIds((current) => current.filter((selected) => selected !== id));
+    onChange(selectedIds.filter((selected) => selected !== id));
   };
 
   return (
@@ -67,7 +71,7 @@ export function ModelPicker({ catalog }: ModelPickerProps) {
       {selectedModels.map((model) => (
         <span
           key={model.id}
-          className="flex items-center gap-1.5 rounded-sm border border-border bg-secondary py-1 pr-1 pl-2 text-sm text-secondary-foreground"
+          className="flex items-center gap-1 rounded-sm border border-border bg-secondary py-0.5 pr-0.5 pl-2 text-xs text-secondary-foreground"
         >
           {model.name}
           <button
