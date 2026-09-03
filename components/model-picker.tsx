@@ -10,9 +10,10 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import type { CatalogModel } from "@/lib/model-catalog";
-import type { FreeModelId } from "@/lib/models";
-
-const MAX_SELECTED = 3;
+import {
+  MAX_SELECTED_MODELS as MAX_SELECTED,
+  type FreeModelId,
+} from "@/lib/models";
 
 function formatContextLength(contextLength: number): string {
   if (contextLength >= 1_000_000) {
@@ -70,7 +71,7 @@ export function ModelPicker({
       {selectedModels.map((model) => (
         <span
           key={model.id}
-          className="flex items-center gap-1.5 rounded-sm border border-border bg-secondary py-1 pr-1 pl-2 text-sm text-secondary-foreground"
+          className="flex items-center gap-1 rounded-sm border border-border bg-secondary py-0.5 pr-0.5 pl-2 text-xs text-secondary-foreground"
         >
           {model.name}
           <button

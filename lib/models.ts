@@ -31,5 +31,16 @@ export const FREE_MODEL_IDS = [
 
 export type FreeModelId = (typeof FREE_MODEL_IDS)[number];
 
+/**
+ * How many models one prompt may be sent to at once.
+ *
+ * Lives here rather than in the picker because three separate places need to
+ * agree on it: the picker's cap, how many a brand-new thread starts with, and
+ * how many an existing thread restores. `POST /api/turns` enforces the same
+ * number server-side via its own `.max(3)`, which is the one that actually
+ * matters — this constant shapes the UI, it doesn't guard the endpoint.
+ */
+export const MAX_SELECTED_MODELS = 3;
+
 export const isFreeModel = (id: string): id is FreeModelId =>
   (FREE_MODEL_IDS as readonly string[]).includes(id);

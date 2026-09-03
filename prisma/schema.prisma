@@ -17,15 +17,21 @@ model User {
   votes     Vote[]
 }
 
+// `updatedAt` is what the sidebar orders by — "most recently used thread",
+// not "most recently created". Prisma's `@updatedAt` only fires on a write to
+// *this* row, and creating a child `Turn` isn't one, so `POST /api/turns`
+// bumps it explicitly inside the same transaction that creates the turn.
 model Thread {
   id        String   @id @default(cuid())
   userId    String
   user      User     @relation(fields: [userId], references: [id])
   title     String
   createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
   turns     Turn[]
 
   @@index([userId])
+  @@index([userId, updatedAt])
 }
 
 // One prompt sent into a thread. Named `Turn`, not `Message`, because one

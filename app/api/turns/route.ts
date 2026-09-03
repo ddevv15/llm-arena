@@ -66,7 +66,7 @@ export async function POST(request: Request) {
     }
   }
 
-  const turn = await prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     // `Thread.userId` and `Vote.userId` both carry a foreign key to `User`,
     // but nothing in the Clerk sign-in flow ever writes that row — this is
     // the first place a signed-in user's id is used for a real write, so it
@@ -79,17 +79,24 @@ export async function POST(request: Request) {
       });
     }
 
-    const thread =
-      threadId ??
-      (
-        await tx.thread.create({
-          data: { userId, title: titleFromPrompt(prompt) },
+    // The sidebar orders by `Thread.updatedAt`, and creating a child `Turn`
+    // doesn't touch the parent row on its own — Prisma's `@updatedAt` only
+    // fires on a write to the thread itself. A thread that was just used has
+    // to say so, so bump it here, in the same transaction as the turn.
+    const thread = threadId
+      ? await tx.thread.update({
+          where: { id: threadId },
+          data: { updatedAt: new Date() },
+          select: { id: true, title: true },
         })
-      ).id;
+      : await tx.thread.create({
+          data: { userId, title: titleFromPrompt(prompt) },
+          select: { id: true, title: true },
+        });
 
-    return tx.turn.create({
+    const turn = await tx.turn.create({
       data: {
-        threadId: thread,
+        threadId: thread.id,
         prompt,
         answers: {
           create: models.map((model) => ({ model })),
@@ -97,15 +104,20 @@ export async function POST(request: Request) {
       },
       select: {
         id: true,
-        threadId: true,
         answers: { select: { id: true, model: true } },
       },
     });
+
+    return { thread, turn };
   });
 
+  // `threadTitle` is here so the sidebar can show a brand-new thread the
+  // moment it exists, without a round trip to re-read the list it just
+  // caused to change.
   return Response.json({
-    threadId: turn.threadId,
-    turnId: turn.id,
-    answers: turn.answers,
+    threadId: result.thread.id,
+    threadTitle: result.thread.title,
+    turnId: result.turn.id,
+    answers: result.turn.answers,
   });
 }
