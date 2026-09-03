@@ -14,6 +14,7 @@ import {
   Trophy,
   X,
 } from "lucide-react";
+import { winRecordLabel } from "@/components/win-record";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -147,13 +148,11 @@ type NavItem = {
   label: string;
   href: string;
   icon: typeof Swords;
-  /** Nav entries whose screen doesn't exist yet render inert, not broken. */
-  pending?: boolean;
 };
 
 const NAV_ITEMS: readonly NavItem[] = [
   { label: "Arena", href: "/", icon: Swords },
-  { label: "Leaderboard", href: "/leaderboard", icon: Trophy, pending: true },
+  { label: "Leaderboard", href: "/leaderboard", icon: Trophy },
   { label: "Models", href: "/models", icon: Boxes },
 ];
 
@@ -194,30 +193,9 @@ function Sidebar({
 
         <nav aria-label="Sections" className="flex flex-col gap-0.5 px-2">
           {NAV_ITEMS.map((item) => {
-            const isActive = !item.pending && pathname === item.href;
-            const content = (
-              <>
-                <item.icon className="size-4 shrink-0" aria-hidden="true" />
-                <span className="flex-1 truncate">{item.label}</span>
-                {item.pending ? (
-                  <span className="shrink-0 font-mono text-[10px] tracking-wide text-muted-foreground uppercase">
-                    Soon
-                  </span>
-                ) : null}
-              </>
-            );
+            const isActive = pathname === item.href;
 
-            // An entry with nowhere to go is text, not a link a person can
-            // click into a 404 — feature #9 turns this one into a real link.
-            return item.pending ? (
-              <span
-                key={item.label}
-                aria-disabled="true"
-                className="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm text-muted-foreground"
-              >
-                {content}
-              </span>
-            ) : (
+            return (
               <Link
                 key={item.label}
                 href={item.href}
@@ -228,7 +206,8 @@ function Sidebar({
                   isActive && "bg-accent font-medium text-accent-foreground",
                 )}
               >
-                {content}
+                <item.icon className="size-4 shrink-0" aria-hidden="true" />
+                <span className="flex-1 truncate">{item.label}</span>
               </Link>
             );
           })}
@@ -443,7 +422,7 @@ function WinChip({ model }: { model: ModelRecord }) {
         {model.wins}/{model.answered}
       </span>
       <span className="sr-only">
-        {model.name}: won {model.wins} of {model.answered}
+        {winRecordLabel(model.name, model.wins, model.answered)}
       </span>
     </li>
   );
