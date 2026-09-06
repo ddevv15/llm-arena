@@ -15,14 +15,18 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ turnId: string }> },
 ) {
-  const { userId } = await auth();
+  // Three independent awaits — Clerk's session, the route params, and the
+  // body — that were serialized for no reason other than reading order.
+  const [{ userId }, { turnId }, body] = await Promise.all([
+    auth(),
+    params,
+    request.json().catch(() => null),
+  ]);
+
   if (!userId) {
     return humanError("Sign in to vote.", 401);
   }
 
-  const { turnId } = await params;
-
-  const body = await request.json().catch(() => null);
   const parsed = requestSchema.safeParse(body);
   if (!parsed.success) {
     return humanError("That vote couldn't be sent. Try again.", 400);

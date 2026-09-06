@@ -7,7 +7,7 @@ import { ThreadWorkspace } from "@/components/thread-workspace";
 import { Button } from "@/components/ui/button";
 import { protectPublicRead } from "@/lib/arcjet";
 import { getModelCatalog } from "@/lib/model-catalog";
-import { getThread, listThreads } from "@/lib/threads";
+import { getThread } from "@/lib/threads";
 import type { ViewerRole } from "@/lib/thread-view";
 
 /**
@@ -115,12 +115,11 @@ export default async function ThreadPage({
 
   const [{ id }, { userId }] = await Promise.all([params, auth()]);
 
-  const [catalog, thread, threads] = await Promise.all([
+  // The sidebar's thread list is the layout's job now, so this page waits only
+  // on the thread it was asked for.
+  const [catalog, thread] = await Promise.all([
     getModelCatalog(),
     getThread(id),
-    // A signed-out visitor has no history to list, and asking for one would be
-    // a query guaranteed to come back empty.
-    userId ? listThreads(userId) : [],
   ]);
 
   if (!thread) {
@@ -141,7 +140,6 @@ export default async function ThreadPage({
     <ThreadWorkspace
       key={detail.id}
       catalog={catalog}
-      threads={threads}
       thread={detail}
       viewer={viewer}
     />

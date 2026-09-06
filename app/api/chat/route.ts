@@ -16,12 +16,17 @@ const humanError = (message: string, status: number) =>
   Response.json({ error: message }, { status });
 
 export async function POST(request: Request) {
-  const { userId } = await auth();
+  // Independent, so they run together. This route is called three times
+  // concurrently per prompt, so a wait saved here is a wait saved three times.
+  const [{ userId }, body] = await Promise.all([
+    auth(),
+    request.json().catch(() => null),
+  ]);
+
   if (!userId) {
     return humanError("Sign in to send a prompt.", 401);
   }
 
-  const body = await request.json().catch(() => null);
   const parsed = requestSchema.safeParse(body);
   if (!parsed.success) {
     return humanError("That prompt couldn't be sent. Try again.", 400);

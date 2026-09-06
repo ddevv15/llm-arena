@@ -18,7 +18,7 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 
 | #   | Feature                                     | Phase      | Status      |
 | --- | ------------------------------------------- | ---------- | ----------- |
-| 1   | Connecting to a model                       | Foundation | in progress |
+| 1   | Connecting to a model                       | Foundation | done        |
 | 2   | Coding standards & tooling                  | Foundation | done        |
 | 3   | Data model                                  | Foundation | done        |
 | 4   | Design & look                               | Foundation | done        |
@@ -28,6 +28,8 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 | 8   | Public thread visibility & sharing          | Slice 3    | done        |
 | 9   | Leaderboard: global & personal              | Slice 4    | done        |
 | 10  | Abuse protection for public reads           | Slice 3    | done        |
+| 11  | Performance & responsiveness                | Slice 5    | in progress |
+| 12  | Browsing without an account                 | Slice 3    | done        |
 
 Deliberately-open items live in `open-issues.md` at the repo root — things decided _not_ to fix yet, with the reason. This file stays the permanent record; that one is the queue.
 
@@ -153,7 +155,7 @@ Decided and built: restore **the last turn's selection, and only that turn's**, 
 
 Verified by hand with a throwaway script: nine cases, including narrowing between turns (not refilled), widening (kept), the cap, models dropped from the free tier, and both fallback paths — all pass. Then against all four real threads in Postgres, each restored exactly its own last turn's models. Then live in the browser: re-opening the thread shows chips for Nemotron 3 Ultra, Laguna S 2.1 and Nemotron 3.5 Lightning, matching that thread's last turn in order, with the picker correctly reading "3/3 selected".
 
-**Open note:** #7 stays _in progress_ on the design question below, not on this.
+**Open note — since closed.** This had read "#7 stays _in progress_ on the design question below, not on this." That design question is the one resolved in the very next paragraph, so the note outlived what it was pointing at; #7 is done and the table has said so since. Left here rather than deleted because "the restore work landed before the design pass did" is the actual order things happened in.
 
 **The design pass happened — this is now the built UI.** The earlier note here (user flagged the shell as not good on sight, deferred behind #5/#6) is resolved. The whole arena screen was rebuilt against `assets/docs/ui-sketch/chat-interface.png`, treated as structure only per the Sketches rule above, with #4's palette and type untouched.
 
@@ -257,6 +259,63 @@ Also worth knowing for later: in development Arcjet logs `will use 127.0.0.1 whe
 
 Two things follow. **Testing:** any future by-hand check of bot rules has to account for this or it will produce confident nonsense. **Production:** the cache key being the IP means a denied bot and a real reader who share an egress address — office NAT, CGNAT, a VPN exit — also share the block, for up to a minute. It is bounded and it isn't worth designing around (the TTL comes from the server, not a knob), but it's the second time IP-keying has shown an edge on shared addresses, alongside the rate limit's own NAT caveat. If 403s ever show up for real readers, this is the first thing to check, and the `console.warn` on the denial path exists to make that answerable — it names the rule, so a `BOT` denial on a residential IP is distinguishable from a `SHIELD` one.
 
+### 12. Browsing without an account
+
+Anyone can look around the whole app without signing in. Sending a prompt is the only thing an account is needed for — that one constraint, and nothing else.
+
+**The wall was never a security boundary, and taking it down doesn't create one.** `/api/turns` already answers a signed-out caller with a 401 and the sentence "Sign in to send a prompt."; `/api/chat` and the vote route each re-check ownership for themselves. Every rule this feature cares about is already enforced on the server and stays exactly where it is. What changes is only the UI, which had been over-enforcing a rule the server already held.
+
+Three separate dead ends, found by reading rather than assumed, and only the first was the reported one:
+
+1. **`/` was a wall.** It returned a bare centred "Sign in" button with no shell and no navigation, so the app's front door was a room with one door back out.
+2. **The sidebar was hidden from signed-out visitors entirely** (`showSidebar={Boolean(userId)}`), so someone arriving on a shared thread link had no way to reach anything else. The existing comment justified this as "an empty sidebar would just be a column of nothing" — which conflates _no thread history_ with _no navigation_. The section nav is not nothing, and it was being thrown out along with the empty list.
+3. **`/leaderboard` and `/models` have no shell at all, for anyone.** Both sit outside the `(arena)` group and render their own bare `<main>`, so even a signed-in person clicking "Leaderboard" in the sidebar arrives somewhere the sidebar doesn't exist, and has to go back to `/` to reach "Models". Signing in never fixed this; it was equally broken both sides of the wall.
+
+Decided, both after asking rather than guessing:
+
+- **A signed-out visitor gets the real composer on `/`, and signing in doesn't cost them their prompt.** They can type and pick models; pressing send opens Clerk. The prompt and the model selection are stashed in `sessionStorage` first and restored on the way back. Chosen over a sign-in panel because the arena is the product and a visitor should be able to reach for it before committing, and over a composer that forgets, because losing what someone just typed is the exact failure feature #11 went out of its way to avoid on a 503 — it would be strange to fix it there and reintroduce it here.
+- **The shell goes on every page.** `/leaderboard` and `/models` move into the `(arena)` group, their duplicated wordmark headers trimmed so they don't double up with the sidebar's. Chosen over the smaller fix because dead end #3 is real for signed-in people too, and leaving it would mean the app is navigable only from two of its four pages.
+
+Decided without asking, since each has an obvious answer:
+
+- **The restored prompt does not auto-send.** It comes back in the box with the models still selected, and the person presses send. Auto-sending would fire a write they never confirmed on this side of the redirect, and with issue #5's 1-in-3 503 currently live it would sometimes greet them with an error they didn't ask for.
+- **`sessionStorage` access is wrapped and failure is silent.** A private-mode browser that throws on write must not take the composer down with it; the worst case is that the prompt isn't there afterwards, which is the behaviour we'd have had anyway.
+- **The composer's three states get named.** `ThreadWorkspace` computes whether this person can send here (`send`), needs an account first (`sign-in`), or is reading someone else's thread (`read-only`). The existing owner/visitor/anonymous role can't express it alone, because "anonymous on the new-thread page" and "anonymous on someone else's thread" want opposite things.
+- **`SignInPrompt` is deleted** rather than left unused, and the empty-state and reader call-to-action copy get variants — both currently say "thread" on a page that has no thread yet.
+
+**One cost, stated up front because it cuts against feature #11.** `/models` is the app's only prerendered route and Phase 0 measured it at 7ms, noting "the one prerendered route, and it shows". Moving it under a layout that calls `auth()` makes it dynamic, and it will land somewhere near `/`'s ~100ms. That is a real regression bought deliberately: app-wide navigation was the thing asked for, and a route nobody can navigate to being fast is a poor trade. Suspense does not rescue it — a dynamic API anywhere in the render opts the whole route out of static generation unless PPR is enabled, which is its own decision and not one to make as a side effect of this. **Feature #11's Phase 4 re-measure must expect this and not read it as a Phase 2/3 regression.**
+
+- [x] Decide the approach
+- [x] Build it
+
+#### As built, verified 2026-09-06
+
+`SignInPrompt` deleted. `/` renders `ThreadWorkspace` with `viewer` following `auth()`. `AppSidebar` renders unconditionally, its thread list swapped for a `SignInInvitation` when signed out, and `SidebarProvider`'s `showSidebar` became `signedIn` to say what it now actually means. `/leaderboard` and `/models` moved into `(arena)`; `LeaderboardHeader` became `LeaderboardIntro` with the wordmark and title removed, and both pages gained a `PageBar` and a scroll container. `SidebarToggles` and `SignInAction` were extracted so the two bars share them rather than repeating them, and the top bar's theme toggle went — everyone has a sidebar now, and two toggles on one screen is one too many. `lib/pending-prompt.ts` holds the stash. `Arena` takes a `ComposerMode` and the send button's accessible name changes to "Sign in to send this prompt", because a button whose name promises one thing and does another is worse than a longer label.
+
+**A lint rule was suppressed, which is worth defending rather than burying.** Restoring the stashed prompt needs `sessionStorage`, which cannot be read during a server render, so the read has to happen after hydration — an effect. `react-hooks/set-state-in-effect` flags that. It is suppressed on one line with the reasoning inline: the rule exists to catch effects that set state on every render and cascade, while this reads once on mount and provably cannot repeat, because `takePendingPrompt` removes the entry as it reads it. The alternative is worse rather than merely harder — a `useState` initializer reading `sessionStorage` renders one thing on the server and another on the client and trips a hydration mismatch on the textarea's own value. Note also that only one of the effect's two writes is flagged: the rule recognises `setSelectedIds` as a `useState` setter and cannot see through `setPrompt`, which arrives from `useArena`. Both are the same one-shot restore.
+
+**Verified.** Signed out, all four pages server-render the section nav with working links to `/leaderboard` and `/models`, the sign-in invitation, and a theme toggle, with no Clerk `UserButton` and no trace of the old wall; `/` carries a real composer whose send button is labelled "Sign in to send this prompt", and the thread page correctly still doesn't. Signed in, `/leaderboard` renders inside the shell with the sidebar, one wordmark, the right nav item marked current, and its own scroll container.
+
+**The restore was exercised end to end** by seeding the stash and loading `/`: the prompt came back into the textarea and the entry was gone afterwards, so it is genuinely take-once. It was seeded with three models on purpose — one live, one on the static `FREE_MODEL_IDS` allowlist but absent from the live catalog (`z-ai/glm-5.2:free`), one long gone (`openai/gpt-oss-20b:free`) — and only the live one was restored. That confirms filtering against the fetched catalog rather than the static allowlist was the right choice: the allowlist is the looser of the two, and restoring from it would have re-selected a model `/api/chat` would then refuse.
+
+**Not visually checked: the signed-out screens.** They were verified from server-rendered HTML instead. Seeing them would have meant signing the browser's real Clerk session out, which is not a change to make to someone's account to satisfy a check, and there was no second session to sign back in with. A private window is the ten-second confirmation if it is wanted.
+
+`/models` is now `ƒ` rather than `○` in the build output, exactly the cost recorded above. Lint, Prettier, TypeScript and `next build` all pass.
+
+#### Follow-up, same day: there was no way back
+
+The user reported no back navigation on any page, and they were right. Looking at it at 390px showed the shape of it: the thread bar was `[hamburger] hi [chip][chip][chip]`, and `PageBar` was `[hamburger] Leaderboard`. The breadcrumb's "Arena /" segment was `hidden sm:block` — deliberately, to give the win chips room — which meant the one back affordance in the app disappeared at exactly the width where the sidebar is also a closed drawer. On a phone, every page's only exit was the hamburger.
+
+Three changes, and the second is the real one:
+
+- **`BackToArena` in both bars, always visible.** It links to `/` rather than calling `history.back()`, and that is deliberate: a thread link is made to be shared, so the commonest way to arrive is cold in a fresh tab with nothing behind it, where `history.back()` does nothing — a worse failure than no button, because it looks broken rather than absent. The label shows from `sm` up; below that the chevron carries it alone.
+- **The win chips now hide below `sm`.** They were the cause, not a bystander: they are what pushed the thread's own name and the way out off a 390px bar. "N 1/3" is not worth either. They return when there is room.
+- **The breadcrumb component is gone.** With a back control in the bar, `Arena / <thread>` was saying the same thing twice at desktop width. The bar is now `[toggles] [‹ Arena] [thread name] [chips] [copy link]`, and `PageBar` matches it exactly.
+
+`sidebar-toggles.tsx` became `bar-controls.tsx`, since it now holds all three shared bar controls rather than just the toggles.
+
+Verified at 390px and 1280px, on a thread and on the leaderboard: back control present at both widths, thread title readable on a phone, no duplication on desktop.
+
 ## Slice 4: Leaderboard
 
 ### 9. Leaderboard: global & personal
@@ -290,6 +349,109 @@ Verified against the real database and a real browser:
 One thing worth knowing before it surprises someone: **with the real data, nothing is ranked.** The most-judged model has 4 contests against a floor of 5, so today every model sits in the "not enough votes yet" group. That is the honest state of a 5-vote arena rather than a bug, and the page reads correctly in it — six models with real records, none ranked. It resolves itself as votes accumulate; lowering `MIN_CONTESTS` is a one-line change if the empty ranking is not wanted for a demo.
 
 Lint, format, TypeScript and `next build` all pass; `/leaderboard` is dynamic, which is correct — it reads votes per request.
+
+## Slice 5: Performance
+
+### 11. Performance & responsiveness
+
+Release 1 shipped and the app is slow and laggy to actually use. This is the pass that fixes that, and the first thing it establishes is that "slow" here is **four independent problems**, not one — confirmed against the user, who feels all four. Lumping them together is what would make this unfixable, because each has a different cause, a different fix, and a different risk.
+
+**1. Navigation paints nothing for roughly half a second to a second.** There is no `loading.tsx`, no `<Suspense>`, and no `error.tsx` anywhere in `app/`. Every route is dynamic because every route reads `auth()`, so Next holds the whole RSC payload until Clerk, Arcjet, Postgres and the OpenRouter catalog have all resolved. Clicking a thread in the sidebar changes nothing on screen until the slowest of those returns. This is the cheapest of the four to fix and probably the most visible.
+
+**2. Two to three seconds between pressing enter and the first token.** `app/api/turns/route.ts` blocks on the Arcjet `detectPromptInjection` decision — measured in feature #10's verification at ~1.6s warm and 3.2s cold — before a single row is written, and the three `/api/chat` calls can only start once it returns. What makes it feel broken rather than merely slow is that `setPrompt("")` sits _after_ the fetch resolves in `components/use-arena.ts`, so the textarea keeps the sent text for the entire wait and the whole thing reads as a dropped keypress.
+
+**3. Every keystroke and every streamed token re-renders the entire app.** `prompt` lives in `useArena`, which is hosted by `ThreadWorkspace` — the component _above_ `AppShell` — and nothing anywhere in `components/` is wrapped in `React.memo`. So one keypress re-renders the shell, the sidebar's fifty thread links (twice, when the mobile drawer is open), the top bar and every win chip, and every prior turn's full prose. `appendChunk` rebuilds the whole `turns` array per token across three concurrent streams, which also invalidates the `modelRecords` memo and re-runs `deriveWinRecords` — a function that clones a `Map` per turn and again per model-per-turn. The worst problem in the app is therefore not a slow algorithm; it is the physical position of one `useState` in the tree.
+
+**4. Unbounded queries with no supporting indexes.** `getGlobalLeaderboard` reads every judged turn in the database with no `take` and ranks in JS on every page view, uncached, for a result that is byte-identical for every viewer on earth. `/api/chat` replays the thread's entire history including full answer bodies, three times concurrently per prompt, on an unindexed `(threadId, createdAt)` scan. `getThread` nests three list levels with no pagination at any of them. All three were correct when the database held one thread and five votes; none of them has a ceiling.
+
+Decided, with the reasons, so none of this gets revisited blind:
+
+- **Arcjet's prompt-injection screen stays blocking, at its 6s deadline.** It is a real 1.6s on the critical path and it is tempting to move it off. It isn't going anywhere: feature #10 established this is where a prompt enters the system, and weakening the screen trades an actual security property for what is really a _perception_ problem. Optimistic UI solves the perception for free and costs nothing in safety, so that is the fix. The 1.6s remains; what goes away is staring at a frozen screen during it.
+- **Thread reads are deliberately not cached across requests.** This looks like the obvious win and it isn't. A thread's answer content is rewritten on every answer settle, so the invalidation rate would roughly equal the write rate and the cache would churn for no gain. The **global leaderboard is** cached, on exactly the opposite reasoning: identical for everyone, and only a vote changes it.
+- **Per-model history is capped at the last 6 turns.** Asked rather than assumed, since it is a genuine product trade — a long thread now genuinely forgets its early turns. Chosen over a token budget because the cutoff is predictable to a person and needs no token counting, and over leaving it unbounded because free-tier context windows are small and send latency currently grows without limit as a thread gets longer.
+- **A baseline gets measured before anything is touched.** Phase 0 exists because "it's slow" has no number attached to it, and without one there is no way to show any of the later phases worked. Production build, not dev — dev-mode React is slow enough to flatter every subsequent measurement.
+
+Phases run cheapest-perceived-win first, and each one reports its decision and stops before building, per `AGENTS.md`.
+
+- [x] Decide the approach
+- [x] Phase 0 — baseline measured, server half. Numbers and the correction they force are below. The client half (Profiler commit counts) still needs a real browser with the extension.
+- [x] Phase 1 — make it feel instant. All seven items built and verified by hand in a real browser against a production build; results and the two findings they turned up are below.
+- [ ] Phase 2 — stop the arena re-rendering itself to death: `prompt` moved down into `Composer`, `React.memo` on the answer/turn/sidebar/top-bar components with stable handlers so the memos actually hold, one lookup `Map` instead of `catalog.find` per row, streamed chunks coalesced onto a ~50ms flush, and the two quadratic reducers rewritten to a single pass.
+- [ ] Phase 3 — server and data: one migration adding `Turn(threadId, createdAt)`, `ModelAnswer(turnId, model, status)` and `ModelAnswer(turnId, status)` and dropping the redundant `Thread(userId)`; the 6-turn history cap; `getGlobalLeaderboard` aggregated in SQL and cached behind a tag the vote route revalidates; the vote route's `P2002` race returning its intended 409 instead of a 500; the Prisma adapter built once.
+- [ ] Phase 4 — client bundle and third party: PostHog's session replay, heatmaps and autocapture set explicitly rather than inherited from a remote preset that can be flipped on without a code change, `posthog.init` deferred off the critical path, font preloading trimmed, and the whole thing re-measured against Phase 0.
+
+#### Phase 0 baseline, measured 2026-09-04
+
+Real production build (`next build` + `next start`), never dev. Authenticated numbers come from a genuine Clerk session minted with the project's own `sk_test_` key through the Backend API, the same technique feature #10's verification landed on — `auth()` refuses the `__session` cookie and wants a bearer token. The four probe threads that created were deleted afterwards and the row counts confirmed identical before and after.
+
+**Database at time of measurement:** 6 users, 5 threads, 9 turns, 26 answers, 5 votes. Biggest thread is 3 turns / 9 answers / 1,551 characters of model prose. 5 judged turns — which is the entire population the leaderboard "full-scans".
+
+| Path                           | Median | Range       | Note                                              |
+| ------------------------------ | ------ | ----------- | ------------------------------------------------- |
+| `POST /api/turns` (signed in)  | 1801ms | 1702–2322ms | **no model called yet** — auth + Arcjet + write   |
+| `GET /leaderboard` (signed in) | 344ms  | 333–741ms   | 180ms signed out; the gap is the serialized board |
+| `GET /thread/[id]` (owner)     | 266ms  | 249–272ms   | understated, see the `ARCJET_ENV` note below      |
+| `GET /` (signed in)            | 100ms  | 95–523ms    | 15ms signed out, which renders no data            |
+| `GET /models`                  | 7ms    | 6–11ms      | the one prerendered route, and it shows           |
+
+Bundle: 1.4 MB of `.next/static`, 1.09 MB raw JS across 21 chunks, roughly 293 KB gzipped in the six largest alone (76 + 63 + 42 + 40 + 39 + 33).
+
+**The dominant number is `POST /api/turns` at 1.8 seconds, and it is worse than the plan assumed.** Two of six probes came back **503**, and the server log names the cause exactly: `Unable to detect prompt injection`. That is the cold-client failure feature #10 already recorded as "exactly one 503 on the first prompt after a start" — here it was the first two of two. So the real experience of sending a prompt on a cold server is not just a 1.8-second wait before the model is even asked; it is a 1-in-3 chance of an outright error, with a textarea that still hasn't cleared. Phase 1's optimistic UI covers the wait, but the 503 is a correctness problem, not a perception one, and it needs its own answer.
+
+**Correction to the plan: cause #4 is a ceiling, not a current symptom, and it gets re-ranked.** The plan justified Phase 3 partly on unbounded queries making the app slow. The data does not support that. The leaderboard's "unbounded full scan" is scanning five rows; the longest thread that could bloat `/api/chat`'s history replay is three turns. Those queries genuinely have no ceiling and will hurt later, so Phase 3 still happens — but as **prevention, not repair**, and it stays last rather than being sold as a fix for anything anyone currently feels. What `/leaderboard`'s 344ms actually is, is fixed overhead: Clerk plus the catalog plus one query serialized after another, which is Phase 1's parallelization, not Phase 3's indexes.
+
+**Found while measuring, and not in the plan: Arcjet's public-read client errors on every single local request.** The log shows `Client IP address is missing. If this is a dev environment set the ARCJET_ENV env var to "development"`, then a fingerprint failure, then `Arcjet decision errored on a thread read` — so `protectPublicRead` fails open on every thread view locally and `.env.local` has no `ARCJET_ENV`. Two consequences worth carrying forward. The 266ms above **excludes a real Arcjet decision**, so the thread page is slower in production than this table says and the Phase 4 re-measure must not compare the two as like for like. And feature #10's careful read-path rules are not actually being exercised locally at all, which is worth knowing before anyone next tries to verify them by hand.
+
+#### Phase 1 decision, taken 2026-09-04, before any code
+
+**Phase 1 cannot make sending a prompt faster, and says so up front.** ~1600ms of the measured 1801ms is the Arcjet decide call this feature already decided stays blocking. Every item below either moves work off the critical path or stops the screen lying about what is happening. The 1.8s number is expected to survive Phase 1 essentially unchanged; what changes is that nobody spends it staring at a frozen textarea.
+
+**The sidebar moves into a shared layout. This is the load-bearing structural change, and it exists because of how `loading.tsx` works.** A loading boundary replaces the entire output of the page it guards, and `AppShell` is currently rendered _by_ the page (`app/page.tsx`, `app/thread/[id]/page.tsx`), not by a layout. So a loading boundary bolted on as-is would blank the sidebar and top bar on every thread click — painting fast, but flashing the fifty thread links to grey and back, which is a different bad experience rather than a fixed one. Hoisting the sidebar into a layout that spans `/` and `/thread/[id]` means Next keeps it mounted across a client navigation and the skeleton only covers what actually changed.
+
+Chosen over the two neighbouring options, both of which were on the table:
+
+- **Skeleton only, no refactor** was rejected despite being much cheaper. It fixes the blank half-second and introduces a full-screen flicker in its place.
+- **Hoisting the whole shell, top bar included,** was rejected as too much for Phase 1, not as wrong. The top bar's win chips are derived from `arena.turns` — live client state owned by the page — so moving it up needs a context bridging page → layout for the chips, the breadcrumb title and the copy-link button. That is a real refactor sitting on top of the one that matters, for the remaining 56 pixels of the screen. It stays available later; Phase 2 is already moving state around in this tree and is the natural place to reconsider.
+
+The cost of the chosen option, stated so it isn't a surprise mid-build: the layout becomes the owner of the thread list, so `onThreadCreated`'s "show the brand-new thread immediately, without a round trip" needs a small client context to reach it. That path is load-bearing — it is what lets `window.history.replaceState` swap the URL without unmounting three in-flight streams — and must keep working exactly as it does now.
+
+Two things decided rather than asked, because there is an obvious right answer:
+
+- **A failed submit restores the prompt text to the textarea** and removes the optimistic turn. Clearing on submit is the whole point of the change, but losing someone's typing to a 503 would be strictly worse than the freeze being fixed. This matters more than it looks, given the measured 1-in-3 cold-start 503 rate.
+- **The optimistic turn renders with the models already selected,** so the columns don't reshuffle when the real answer ids arrive — only the ids change, not the shape.
+
+Two items added to the phase that the plan didn't list:
+
+- **`error.tsx` for the three routes.** The plan names "no `error.tsx` anywhere" as part of cause #1 but the checklist only carried the loading half. Without one, a route-level error escalates to `global-error.tsx`, which replaces the entire document, shell included.
+- **`ARCJET_ENV=development` in `.env.local` and `.env.example`.** Phase 0 found the public-read client erroring on every local request, so `protectPublicRead` fails open locally and feature #10's read-path rules aren't exercised by hand at all. Fixing it now, rather than at Phase 4, means every measurement taken from here on is comparable to production instead of quietly understating it.
+
+**Explicitly not in Phase 1: the cold-start 503.** Phase 0 caught two of six probes failing outright. Optimistic UI makes that _more_ visible, not less — the turn appears and then vanishes — so it is a real question and it gets asked on its own rather than folded in here.
+
+#### Phase 1 as built, verified 2026-09-06
+
+Seven things shipped:
+
+- **The sidebar moved to `app/(arena)/layout.tsx`**, with `/` and `/thread/[id]` in a new `(arena)` route group. `AppShell` is gone, split into `AppSidebar` (layout) and `AppTopBar` (page), with `SidebarProvider` carrying the state the two still share — the thread list, and the open/collapse flags the top bar's buttons drive.
+- **`loading.tsx` and `error.tsx`** on `/`, `/thread/[id]` and `/leaderboard`, built on a new `components/skeleton.tsx` and a shared `RouteError`.
+- **The composer clears on submit** and the turn is rendered optimistically, with a new client-only `PENDING` answer status.
+- **`auth()` and `request.json()` run in parallel** in all three API routes (the vote route also parallelises `params`).
+- **`/api/turns`' waves collapsed.** The separate ownership `findUnique` is gone, folded into `thread.update`'s `where` and surfacing as `P2025` → 404. The new-thread path is now a single `turn.create` with a nested thread create and `connectOrCreate` on the user, replacing a three-statement transaction.
+- **`ARCJET_ENV=development`** in `.env.local`, documented in `.env.example`.
+
+**The design rule for the skeletons, since it will come up again: draw the structure, mute only the entries.** A blank ledger page still has its rules printed on it. The frame, the column hairlines and the dashed footing rule are all certain before the query returns, so they render for real at full strength and only the unknown words breathe. The leaderboard's skeleton goes further and renders the _real_ heading and explanatory copy — none of it depends on a vote, so greying it out would be inventing uncertainty. `LeaderboardHeader` was extracted so the page and its skeleton can't drift. One consequence: the swap from skeleton to content barely moves anything, because the structure was never in question.
+
+Two things worth knowing that came out of building it, neither of them planned:
+
+- **`--secondary` and `--muted` are the same value in light mode** (`#e4d4be`), so the first version of the prompt-bubble skeleton — muted lines inside a secondary bubble — was literally invisible. Caught by looking at it, not by reading it. The bubble is now one breathing block. Worth remembering before anything else puts muted on secondary.
+- **`activeThreadId` needed no state at all.** The first attempt kept it in `SidebarProvider` and synced it from the pathname in an effect, which the lint rule for cascading renders correctly rejected. It is now derived straight from `usePathname()` — Next syncs that with `history.replaceState`, which is exactly what the new-thread path does, so the one case that looked like it needed its own copy didn't. Confirmed live: after the first prompt the sidebar highlighted the new thread and the owner-only "Copy link" button appeared, both of which read `activeThreadId`.
+
+**Verified by hand, production build, real browser, signed-in session.** The sidebar's DOM node was tagged with an attribute before clicking "Arena" and still carried it afterwards, so the layout genuinely keeps it mounted across a client navigation rather than re-rendering it quickly. Sending a prompt cleared the composer immediately, put the prompt and three model columns on screen before the server had agreed the turn existed, swapped the URL to `/thread/[id]` without unmounting the streams, and added the thread to the sidebar as "Just now". The probe thread was deleted afterwards and the row counts confirmed identical to this feature's Phase 0 baseline — 6 users, 5 threads, 9 turns, 26 answers, 5 votes. Lint, Prettier, TypeScript and `next build` all pass.
+
+**The failure path got verified for real, because it happened on its own.** Three of four attempts to send came back 503, and the rollback did exactly what it was designed to: the optimistic turn was removed, the prompt was put back in the textarea verbatim, and the plain sentence appeared. Which is the good news inside the bad news — see below.
+
+**Finding, and it is worse than Phase 0 recorded: `Unable to detect prompt injection` is not a cold-start problem.** Phase 0 read it as "the first prompt after a start". It happened three times out of four here, twice on a server that had been warm for half an hour, roughly 27 minutes apart. So the 1-in-3 error rate is not a warm-up cost that a first request absorbs; on this evidence it is the steady state. That is now the most important open thing in this feature, and it is deliberately not fixed here — see `open-issues.md`.
+
+**Finding: `ajPublic` has the same deadline problem the write path already solved, and it was hidden.** With `ARCJET_ENV` set, the first `/thread/[id]` read took 2.6s and logged `[deadline_exceeded] the operation timed out`; the next two took ~480ms and passed. `lib/arcjet.ts` says `ajPublic` "deliberately keeps the default" because "it stayed healthy throughout the same testing" — that observation was made while the missing client IP meant no decision was actually being reached locally, so it isn't evidence of anything. The read path fails _open_, so a reader still gets their page and nothing is broken; what it means is that a cold public read currently goes unscreened. Also note the honest read-path cost is ~480ms warm, not the 266ms in the Phase 0 table, which excluded a real decision exactly as that table warned.
 
 ## Not doing right now
 

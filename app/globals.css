@@ -103,3 +103,39 @@ body {
     outline-offset: 2px;
   }
 }
+
+/**
+ * An entry on the ledger that hasn't been written yet.
+ *
+ * Only the entries. A blank ledger page still has its rules printed on it, and
+ * a loading arena is the same: the frame, the column hairlines and the footing
+ * rule are all certain, so they are drawn for real at full strength and only
+ * the words are drawn as a bar. That is also why the swap to real content is
+ * barely visible — the structure never moves.
+ *
+ * The breath is slow on purpose. The app has one motion beat, the receipt
+ * printing in when an answer settles, and a skeleton that flashed would be
+ * competing with it.
+ */
+@keyframes skeleton-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.skeleton {
+  background-color: var(--color-muted);
+  border-radius: var(--radius-sm);
+  animation: skeleton-breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+    opacity: 0.75;
+  }
+}

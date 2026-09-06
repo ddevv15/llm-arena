@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
+import { LeaderboardIntro } from "@/components/leaderboard-intro";
+import { PageBar } from "@/components/page-bar";
 import { WinExpression, WinRateBar } from "@/components/win-record";
 import {
   getGlobalLeaderboard,
@@ -167,50 +168,40 @@ export default async function LeaderboardPage() {
   const personal = userId ? await getPersonalLeaderboard(userId) : null;
 
   return (
-    <main className="mx-auto flex max-w-3xl flex-col gap-10 px-4 py-12">
-      <div className="flex flex-col gap-2">
-        <Link href="/" className="font-display text-xl font-medium">
-          LLM Arena
-        </Link>
-        <h1 className="font-display text-2xl font-medium">Leaderboard</h1>
-        <p className="max-w-prose text-muted-foreground">
-          Which model wins when someone picks between real answers to the same
-          prompt. A model is only counted in rounds it actually answered and
-          someone voted on.
-        </p>
-        <p className="max-w-prose text-sm text-muted-foreground">
-          Speed and time-to-first-token aren&apos;t here yet. Both are currently
-          measured in a way that misreports models which reason before
-          answering, and a wrong number averaged across models would be worse
-          than no number.
-        </p>
-      </div>
+    <>
+      <PageBar title="Leaderboard" />
+      <main className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto flex max-w-3xl flex-col gap-10 px-4 py-12">
+          <LeaderboardIntro />
 
-      <Board
-        heading="Everyone"
-        board={global}
-        catalog={catalog}
-        empty={
-          <p className="max-w-prose text-muted-foreground">
-            Nobody has voted yet. Send a prompt to two or three models, pick the
-            answer you&apos;d actually use, and the first result shows up here.
-          </p>
-        }
-      />
+          <Board
+            heading="Everyone"
+            board={global}
+            catalog={catalog}
+            empty={
+              <p className="max-w-prose text-muted-foreground">
+                Nobody has voted yet. Send a prompt to two or three models, pick
+                the answer you&apos;d actually use, and the first result shows
+                up here.
+              </p>
+            }
+          />
 
-      {personal && (
-        <Board
-          heading="Your votes"
-          board={personal}
-          catalog={catalog}
-          empty={
-            <p className="max-w-prose text-muted-foreground">
-              You haven&apos;t picked a winner yet. Once you vote on a turn,
-              your own record appears here alongside everyone else&apos;s.
-            </p>
-          }
-        />
-      )}
-    </main>
+          {personal && (
+            <Board
+              heading="Your votes"
+              board={personal}
+              catalog={catalog}
+              empty={
+                <p className="max-w-prose text-muted-foreground">
+                  You haven&apos;t picked a winner yet. Once you vote on a turn,
+                  your own record appears here alongside everyone else&apos;s.
+                </p>
+              }
+            />
+          )}
+        </div>
+      </main>
+    </>
   );
 }
