@@ -453,6 +453,25 @@ Two things worth knowing that came out of building it, neither of them planned:
 
 **Finding: `ajPublic` has the same deadline problem the write path already solved, and it was hidden.** With `ARCJET_ENV` set, the first `/thread/[id]` read took 2.6s and logged `[deadline_exceeded] the operation timed out`; the next two took ~480ms and passed. `lib/arcjet.ts` says `ajPublic` "deliberately keeps the default" because "it stayed healthy throughout the same testing" — that observation was made while the missing client IP meant no decision was actually being reached locally, so it isn't evidence of anything. The read path fails _open_, so a reader still gets their page and nothing is broken; what it means is that a cold public read currently goes unscreened. Also note the honest read-path cost is ~480ms warm, not the 266ms in the Phase 0 table, which excluded a real decision exactly as that table warned.
 
+#### The cold-start 503, fixed 2026-09-07
+
+Phase 1 left this open as `open-issues.md` #5 rather than guessing at it, and the guess would have been wrong. Diagnosed by calling the real `aj` client directly, outside Next entirely, which is what made it legible:
+
+- **Two separate fresh Node processes each failed on call 0 and no other call** — twelve calls in one, nine in the other.
+- **Idle does not bring it back.** Two 90-second gaps mid-run, three calls after each, no failures.
+- **Only the one rule fails.** The failing decision reads `SHIELD:ALLOW RATE_LIMIT:ALLOW BOT:ALLOW ERROR:ERROR`. That is what rules out the key, the network and the deadline: all four rules share those, and three of them evaluate normally.
+- **Not the deadline.** It lands at 1.5–1.9s, inside the six seconds. Warm calls run 440–990ms.
+
+**Phase 0's original reading was right and the correction written against it was wrong.** `open-issues.md` had come to say "this is not warm-up", on the strength of three failures in four attempts during Phase 1's browser session. That session spanned rebuilds and restarts, so those were several first calls rather than one warm server failing repeatedly — attributed to a single process without checking.
+
+**The fix is a throwaway call at startup**, `warmPromptInjectionRule`, awaited from `instrumentation.ts` beside `assertRequiredEnv`. It spends the broken first call so a person never does, on its own `userId` so the token bucket it touches is not a real one's. Awaited rather than fired and forgotten, because the point is that it _finishes_ before a real prompt arrives; it is bounded by the client's own six-second deadline, so it cannot hang the boot. Unlike its neighbour it is deliberately not fatal — missing config is a deployment that cannot work, while a warm-up that did not land just means the next caller pays what they would have paid anyway.
+
+Chosen over retrying the decide once, which pays roughly three seconds on the failure path and treats the symptom on every occurrence, and over failing open on this specific error, which was the only option that gives up real protection and is unnecessary now the failure is known to be bounded to one call. Worth noting the fix keeps this route's posture _against_ Arcjet's own guidance: their reference says an errored decision means the SDK already failed open and you should log and allow. Feature #10 deliberately fails closed here. Warming is what makes that affordable, by stopping the hiccup reaching the branch.
+
+It matters more in production than the local numbers suggest: every cold serverless instance is a fresh process, so without this the sacrificial call is the first real prompt on that instance.
+
+**Verified on a fresh production build.** The boot log reads `Arcjet prompt-injection rule warmed { absorbedTheColdFailure: true }` — the warm-up caught the failure, which is the log line doing its job. The first real prompt sent afterwards went through, streamed, and created its thread, with zero `errored on a turn write` in the log; before this, that exact first send reliably 503'd. The probe thread was deleted and row counts match the Phase 0 baseline. The log line reports `absorbedTheColdFailure` rather than staying silent so that if it ever starts reporting `false` on a cold boot, the workaround can be retired instead of quietly outliving the bug.
+
 ## Not doing right now
 
 Kept here so the plan stays honest about what's deliberately left out.

@@ -48,10 +48,18 @@ import { env } from "@/lib/env";
  * worst case with room, and is only ever the ceiling on how long someone waits
  * before a 503 on the failure path.
  *
- * `ajPublic` deliberately keeps the default. Its rules are lighter, it stayed
- * healthy throughout the same testing, and it fails *open* — so a timeout there
- * costs one unscreened page view rather than a rejected prompt, and a fast page
- * is worth more than a slow guarantee.
+ * `ajPublic` deliberately keeps the default. Its rules are lighter, it fails
+ * *open* — so a timeout there costs one unscreened page view rather than a
+ * rejected prompt — and a fast page is worth more than a slow guarantee. The
+ * claim that it "stayed healthy throughout the same testing" used to sit here
+ * and has been removed: that testing never reached a decision on the read path
+ * at all, because `ARCJET_ENV` was unset and the missing client IP made every
+ * public read fail open silently. See `open-issues.md` #6.
+ *
+ * This deadline is also not the whole story on the write path. A separate
+ * failure — the prompt-injection rule erroring on the first call in a fresh
+ * process — lands well inside six seconds, so no deadline addresses it. That
+ * one is handled by `warmPromptInjectionRule` at the bottom of this file.
  */
 const WRITE_DECISION_TIMEOUT_MS = 6_000;
 
@@ -155,3 +163,60 @@ export const ajPublic = arcjet({
 export const protectPublicRead = cache(async function protectPublicRead() {
   return ajPublic.protect(await arcjetRequest());
 });
+
+/**
+ * Spend the prompt-injection rule's broken first call at startup, so a person
+ * never does.
+ *
+ * Measured rather than guessed (`open-issues.md` #5): in a fresh process the
+ * very first `detectPromptInjection` evaluation comes back
+ * `Unable to detect prompt injection - contact Arcjet support`, and every call
+ * after it succeeds. Two separate processes, call 0 in each and no other call;
+ * two 90-second idle gaps mid-run brought it back neither time. On the failing
+ * decision the other three rules report `ALLOW` normally and only this one is
+ * replaced by an error result, which is what rules out the key, the network
+ * and the deadline — all four rules share those.
+ *
+ * It is separate from `WRITE_DECISION_TIMEOUT_MS` above and no deadline fixes
+ * it: the failure lands at 1.5–1.9s, comfortably inside the six seconds.
+ *
+ * This matters in production more than it looks. Every cold serverless
+ * instance is a fresh process, so without this the sacrificial call is the
+ * first real prompt somebody sends on that instance — and `/api/turns` fails
+ * closed, so they get a 503 rather than an unscreened answer.
+ *
+ * Deliberately not fatal. `assertRequiredEnv` beside it in `instrumentation.ts`
+ * crashes the process, because missing config is a deployment that cannot
+ * work; a warm-up that didn't land just means the next caller pays what they
+ * would have paid anyway. The decision is thrown away either way — including a
+ * `DENY`, which would only mean Arcjet took exception to the throwaway
+ * sentence below.
+ */
+const WARMUP_USER_ID = "arcjet-warmup";
+
+export async function warmPromptInjectionRule(): Promise<void> {
+  try {
+    const decision = await aj.protect(
+      new Request("http://localhost/instrumentation/warmup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      }),
+      {
+        // A userId of its own, so the throwaway call spends a token from its
+        // own bucket instead of a real person's.
+        userId: WARMUP_USER_ID,
+        requested: 1,
+        detectPromptInjectionMessage: "What is five times five?",
+      },
+    );
+
+    console.info("Arcjet prompt-injection rule warmed", {
+      // Expected to be the failing one. Logged rather than hidden so that if
+      // this ever starts reporting `ok` on a cold boot, the workaround can be
+      // retired instead of quietly outliving the bug.
+      absorbedTheColdFailure: decision.isErrored(),
+    });
+  } catch (error) {
+    console.warn("Arcjet warm-up did not complete", { error });
+  }
+}

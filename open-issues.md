@@ -4,7 +4,7 @@ Things deliberately left open, with enough context to pick up cold. Each one say
 
 The first three came out of feature #10 (abuse protection for public reads); the rest came out of feature #11 (performance). See those sections of `scope.md` for the full reasoning.
 
-**#5 is the one to pick up next.** It is the only item here that is both currently reproducible and currently breaking something a person would notice.
+Numbers are stable — a closed item is deleted and the rest keep their numbering, so a reference to "#4" in a commit or a comment still means the same thing later.
 
 ## 1. Measure Arcjet decide latency in production, and watch the 429 / 403 rate
 
@@ -46,26 +46,12 @@ It is also not yet a live problem. Threads today are short enough that this is a
 
 **Done looks like.** First a number: the turn count at which the page actually gets slow, taken from real threads rather than assumed. Then a product decision — windowed with a control to load earlier, virtualised so the DOM stays small while the data doesn't, or capped with the full transcript behind an explicit request. `getThread` is already `cache()`-wrapped per request, so whichever shape wins only has to change the query and the component that renders it.
 
-## 5. `Unable to detect prompt injection` fails roughly one prompt in three
-
-**What.** `aj.protect()` on `/api/turns` comes back errored with `Unable to detect prompt injection - contact Arcjet support`, and the route fails closed on that by design, so the person gets a 503 and their prompt is refused. Feature #11's Phase 1 verification hit it three times in four attempts.
-
-Phase 0 recorded this as a cold-start cost — "exactly one 503 on the first prompt after a start". **That reading is now known to be wrong.** Two of the three failures were on a server that had been up for half an hour and had already served successful requests, about 27 minutes apart. Whatever this is, it is not warm-up.
-
-It is also distinct from the deadline problem `WRITE_DECISION_TIMEOUT_MS` already solved. A blown deadline reports `[deadline_exceeded] the operation timed out`; this reports a named service failure, and it arrives well inside the six seconds. Raising the deadline again would not touch it.
-
-**Why not now.** Phase 1 was scoped to how the wait feels, and it deliberately did not fold in a correctness bug it would have had to guess at. The guessing is the problem: the message says to contact Arcjet support, and nothing local distinguishes "this account or key has a broken prompt-injection entitlement", "the model backing that rule is down", and "something about these particular prompts". Picking a fix before knowing which would mean weakening a security control on a hunch — and feature #10 settled that this rule is the reason the write path is guarded at all.
-
-Phase 1 did make the failure survivable rather than destructive, which is why this is a queued question and not an emergency: the optimistic turn rolls back, the prompt is returned to the textarea intact, and the person sees a plain sentence and can retry. Verified live, on real failures.
-
-**Done looks like.** First the actual cause, which almost certainly means asking Arcjet with the error text and a timestamp, since the message asks for exactly that. Then a decision that is a real fork and should be asked rather than assumed: retry the decide once before failing, fail open on _this specific_ error while keeping the other rules closed, or leave it closed and rely on the retry the person now has. The middle option is the one that trades away real protection, so it needs to be chosen deliberately rather than reached for because it makes the number go away.
-
 ## 6. The public read path's Arcjet deadline was never actually tested
 
-**What.** `ajPublic` keeps the SDK's default decide deadline (500ms in production, 1000ms in development). `lib/arcjet.ts` justifies that in a comment: its rules are lighter and "it stayed healthy throughout the same testing" that forced the write path up to six seconds.
+**What.** `ajPublic` keeps the SDK's default decide deadline (500ms in production, 1000ms in development), on the grounds that its rules are lighter than the write path's.
 
-That justification does not hold, because during that testing the read path was not reaching a decision at all. `.env.local` had no `ARCJET_ENV`, so Arcjet could not resolve a client IP behind the dev server, the fingerprint failed, and every public read errored out and failed open — silently, since a failed-open read renders exactly like an allowed one. Feature #11 set `ARCJET_ENV` and the real behaviour appeared immediately: the first `/thread/[id]` read took 2.6s and logged `[deadline_exceeded]`, then settled to ~480ms.
+The comment in `lib/arcjet.ts` used to add that it "stayed healthy throughout the same testing" that forced the write path up to six seconds. That half has since been removed from the code, because it does not hold: during that testing the read path was not reaching a decision at all. `.env.local` had no `ARCJET_ENV`, so Arcjet could not resolve a client IP behind the dev server, the fingerprint failed, and every public read errored out and failed open — silently, since a failed-open read renders exactly like an allowed one. Feature #11 set `ARCJET_ENV` and the real behaviour appeared immediately: the first `/thread/[id]` read took 2.6s and logged `[deadline_exceeded]`, then settled to ~480ms.
 
 **Why not now.** Nothing is broken for a reader. The read path fails open on purpose — feature #10 decided a shared link going dark because a security service blinked is worse than an unscreened page view — so the page still renders. What it costs is that a cold read goes unscreened, which is a weaker guarantee than the code's comment currently claims. Raising the deadline is a one-line change, but picking the number wants production data rather than one local cold start, and that data is issue #1's job.
 
-**Done looks like.** Read-path decide latency from a deployed instance (issue #1 already has to collect it), then either a deadline sized against it the way the write path's six seconds were, or a deliberate decision that failing open on a cold read is fine and the comment gets corrected instead. Either way `lib/arcjet.ts`'s claim that `ajPublic` "stayed healthy" needs rewriting — it was never tested.
+**Done looks like.** Read-path decide latency from a deployed instance (issue #1 already has to collect it), then either a deadline sized against it the way the write path's six seconds were, or a deliberate decision that failing open on a cold read is fine. The stale claim in the comment is already gone; what remains open is the number.
