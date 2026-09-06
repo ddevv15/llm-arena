@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
 import { aj } from "@/lib/arcjet";
-import { FREE_MODEL_IDS } from "@/lib/models";
+import { FREE_MODEL_IDS, type FreeModelId } from "@/lib/models";
 import { prisma } from "@/lib/prisma";
 
 const requestSchema = z.object({
@@ -20,13 +20,112 @@ const titleFromPrompt = (prompt: string): string =>
     ? `${prompt.slice(0, MAX_TITLE_LENGTH).trimEnd()}…`
     : prompt;
 
+/** What the client needs back: the turn, and one row per model to stream. */
+const TURN_SELECT = {
+  id: true,
+  answers: { select: { id: true, model: true } },
+} as const;
+
+/**
+ * Prisma's "an update matched no row". Checked structurally rather than by
+ * importing the error class, which lives in the generated client and would tie
+ * this route to that import path for one string comparison.
+ */
+const isMissingRecord = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  "code" in error &&
+  error.code === "P2025";
+
+type NewTurn = {
+  readonly userId: string;
+  readonly prompt: string;
+  readonly models: readonly FreeModelId[];
+};
+
+/**
+ * A follow-up in a thread that already exists.
+ *
+ * Ownership is the `where` clause, not a query ahead of it. The old shape read
+ * the thread, compared `userId` in JS, and only then opened the transaction —
+ * a whole round trip whose entire output was a boolean the database could just
+ * as well have enforced. A thread that isn't this user's now matches nothing
+ * and Prisma raises `P2025`, which the caller turns into the same 404.
+ *
+ * The `updatedAt` bump is still explicit and still has to be: the sidebar
+ * orders by it, and Prisma's `@updatedAt` doesn't fire when a child `Turn` is
+ * created.
+ */
+async function appendTurn({
+  userId,
+  threadId,
+  prompt,
+  models,
+}: NewTurn & { readonly threadId: string }) {
+  return prisma.$transaction(async (tx) => {
+    const thread = await tx.thread.update({
+      where: { id: threadId, userId },
+      data: { updatedAt: new Date() },
+      select: { id: true, title: true },
+    });
+
+    const turn = await tx.turn.create({
+      data: {
+        threadId: thread.id,
+        prompt,
+        answers: { create: models.map((model) => ({ model })) },
+      },
+      select: TURN_SELECT,
+    });
+
+    return { thread, turn };
+  });
+}
+
+/**
+ * The first prompt of a brand-new thread — user row, thread, turn and answers
+ * in a single statement.
+ *
+ * `connectOrCreate` is doing real work here. `Thread.userId` and `Vote.userId`
+ * both carry a foreign key to `User`, but nothing in the Clerk sign-in flow
+ * ever writes that row, so this is the first place a signed-in user's id is
+ * used for a write and it has to create the row on first use. It used to be a
+ * separate `upsert` inside the transaction, which meant three statements to
+ * say one thing.
+ */
+async function startThread({ userId, prompt, models }: NewTurn) {
+  const { thread, ...turn } = await prisma.turn.create({
+    data: {
+      prompt,
+      answers: { create: models.map((model) => ({ model })) },
+      thread: {
+        create: {
+          title: titleFromPrompt(prompt),
+          user: {
+            connectOrCreate: { where: { id: userId }, create: { id: userId } },
+          },
+        },
+      },
+    },
+    select: { ...TURN_SELECT, thread: { select: { id: true, title: true } } },
+  });
+
+  return { thread, turn };
+}
+
 export async function POST(request: Request) {
-  const { userId } = await auth();
+  // Independent work, so it runs at the same time. `auth()` reads headers and
+  // cookies; parsing the body touches neither. Awaiting them one after the
+  // other was two waits for the price of one piece of information.
+  const [{ userId }, body] = await Promise.all([
+    auth(),
+    request.json().catch(() => null),
+  ]);
+
   if (!userId) {
     return humanError("Sign in to send a prompt.", 401);
   }
 
-  const body = await request.json().catch(() => null);
   const parsed = requestSchema.safeParse(body);
   if (!parsed.success) {
     return humanError("That prompt couldn't be sent. Try again.", 400);
@@ -85,68 +184,29 @@ export async function POST(request: Request) {
     );
   }
 
-  if (threadId) {
-    const thread = await prisma.thread.findUnique({
-      where: { id: threadId },
-      select: { userId: true },
+  try {
+    const { thread, turn } = threadId
+      ? await appendTurn({ userId, threadId, prompt, models })
+      : await startThread({ userId, prompt, models });
+
+    // `threadTitle` is here so the sidebar can show a brand-new thread the
+    // moment it exists, without a round trip to re-read the list it just
+    // caused to change.
+    return Response.json({
+      threadId: thread.id,
+      threadTitle: thread.title,
+      turnId: turn.id,
+      answers: turn.answers,
     });
-    if (!thread || thread.userId !== userId) {
+  } catch (error) {
+    // The only expected failure: `appendTurn`'s `where` matched no row, which
+    // means the thread is gone or was never this user's. Both are a 404 —
+    // threads are link-public, so there is nothing left to conceal by
+    // collapsing the two, and feature #8 already settled that a 404 means
+    // genuinely absent.
+    if (isMissingRecord(error)) {
       return humanError("That thread couldn't be found.", 404);
     }
+    throw error;
   }
-
-  const result = await prisma.$transaction(async (tx) => {
-    // `Thread.userId` and `Vote.userId` both carry a foreign key to `User`,
-    // but nothing in the Clerk sign-in flow ever writes that row — this is
-    // the first place a signed-in user's id is used for a real write, so it
-    // has to create the row on first use rather than assume it exists.
-    if (!threadId) {
-      await tx.user.upsert({
-        where: { id: userId },
-        create: { id: userId },
-        update: {},
-      });
-    }
-
-    // The sidebar orders by `Thread.updatedAt`, and creating a child `Turn`
-    // doesn't touch the parent row on its own — Prisma's `@updatedAt` only
-    // fires on a write to the thread itself. A thread that was just used has
-    // to say so, so bump it here, in the same transaction as the turn.
-    const thread = threadId
-      ? await tx.thread.update({
-          where: { id: threadId },
-          data: { updatedAt: new Date() },
-          select: { id: true, title: true },
-        })
-      : await tx.thread.create({
-          data: { userId, title: titleFromPrompt(prompt) },
-          select: { id: true, title: true },
-        });
-
-    const turn = await tx.turn.create({
-      data: {
-        threadId: thread.id,
-        prompt,
-        answers: {
-          create: models.map((model) => ({ model })),
-        },
-      },
-      select: {
-        id: true,
-        answers: { select: { id: true, model: true } },
-      },
-    });
-
-    return { thread, turn };
-  });
-
-  // `threadTitle` is here so the sidebar can show a brand-new thread the
-  // moment it exists, without a round trip to re-read the list it just
-  // caused to change.
-  return Response.json({
-    threadId: result.thread.id,
-    threadTitle: result.thread.title,
-    turnId: result.turn.id,
-    answers: result.turn.answers,
-  });
 }

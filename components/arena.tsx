@@ -3,15 +3,17 @@
 import { useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { SignInButton } from "@clerk/nextjs";
+import { SignInButton, useClerk } from "@clerk/nextjs";
 import { ArrowUp } from "lucide-react";
 import { ModelPicker } from "@/components/model-picker";
 import { ReceiptFooter } from "@/components/receipt-footer";
+import { SkeletonProse } from "@/components/skeleton";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import type { CatalogModel } from "@/lib/model-catalog";
 import type { FreeModelId } from "@/lib/models";
+import { savePendingPrompt } from "@/lib/pending-prompt";
 import type { ViewerRole } from "@/lib/thread-view";
 import type { ArenaAnswer, ArenaController, ArenaTurn } from "./use-arena";
 
@@ -31,12 +33,23 @@ const COLUMN_CLASS: Record<number, string> = {
   3: "md:grid-cols-3",
 };
 
+/**
+ * What the composer can do here.
+ *
+ * `send` writes a turn. `sign-in` is a real, usable composer for someone
+ * without an account — they can type and choose models, and pressing send
+ * takes them to Clerk with the draft kept. `read-only` is someone else's
+ * thread, which no account will ever let them add to.
+ */
+export type ComposerMode = "send" | "sign-in" | "read-only";
+
 type ArenaProps = {
   catalog: CatalogModel[];
   arena: ArenaController;
   selectedIds: FreeModelId[];
   onSelectionChange: (ids: FreeModelId[]) => void;
   viewer: ViewerRole;
+  composerMode: ComposerMode;
 };
 
 const humanNumber = (value: number | null, digits = 0) =>
@@ -48,31 +61,42 @@ export function Arena({
   selectedIds,
   onSelectionChange,
   viewer,
+  composerMode,
 }: ArenaProps) {
   const { turns, prompt, setPrompt, submitting, submitError, submit, vote } =
     arena;
+  const clerk = useClerk();
 
-  const isOwner = viewer === "owner";
+  const canVote = viewer === "owner";
 
   const modelName = useCallback(
     (id: string) => catalog.find((model) => model.id === id)?.name ?? id,
     [catalog],
   );
 
-  const send = () => void submit(selectedIds);
+  const send = () => {
+    if (composerMode === "sign-in") {
+      // Stash first, then leave. Clerk brings them back to `/`, where
+      // `ThreadWorkspace` puts the draft and the model choice back.
+      savePendingPrompt({ prompt: prompt.trim(), models: selectedIds });
+      void clerk.redirectToSignIn({ signInForceRedirectUrl: "/" });
+      return;
+    }
+    void submit(selectedIds);
+  };
 
   return (
     <div className="mx-auto flex h-full max-w-6xl flex-col">
       <div className="flex flex-1 flex-col gap-10 px-4 py-8">
         {turns.length === 0 ? (
-          <EmptyState isOwner={isOwner} />
+          <EmptyState composerMode={composerMode} />
         ) : (
           turns.map((turn) => (
             <TurnPanel
               key={turn.id}
               turn={turn}
               modelName={modelName}
-              canVote={isOwner}
+              canVote={canVote}
               onVote={vote}
             />
           ))
@@ -80,7 +104,9 @@ export function Arena({
       </div>
 
       <div className="sticky bottom-0 bg-background px-4 pb-4">
-        {isOwner ? (
+        {composerMode === "read-only" ? (
+          <ReaderCallToAction viewer={viewer} />
+        ) : (
           <Composer
             catalog={catalog}
             selectedIds={selectedIds}
@@ -90,17 +116,16 @@ export function Arena({
             submitting={submitting}
             submitError={submitError}
             onSend={send}
+            needsAccount={composerMode === "sign-in"}
           />
-        ) : (
-          <ReaderCallToAction viewer={viewer} />
         )}
       </div>
     </div>
   );
 }
 
-function EmptyState({ isOwner }: { isOwner: boolean }) {
-  if (!isOwner) {
+function EmptyState({ composerMode }: { composerMode: ComposerMode }) {
+  if (composerMode === "read-only") {
     return (
       <p className="py-8 text-center text-muted-foreground">
         Nothing has been asked in this thread yet.
@@ -117,6 +142,14 @@ function EmptyState({ isOwner }: { isOwner: boolean }) {
         One prompt, up to three answers side by side, with the real numbers
         underneath each one.
       </p>
+      {/* Said here rather than only at the send button, so the one thing an
+          account is for is clear before someone starts typing — not after. */}
+      {composerMode === "sign-in" ? (
+        <p className="max-w-prose text-sm text-muted-foreground">
+          Read any thread, compare the models and check the leaderboard without
+          an account. Sending a prompt is the only part that needs one.
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -236,6 +269,12 @@ function AnswerColumn({
           <p className="text-muted-foreground">
             This model didn&apos;t finish answering.
           </p>
+        ) : answer.status === "PENDING" ? (
+          // The prompt is on screen before the server has agreed the turn
+          // exists, so this column is genuinely empty rather than slow — the
+          // same unwritten-ledger treatment the loading routes use, for the
+          // same reason.
+          <SkeletonProse lines={4} />
         ) : (
           <>
             {answer.content}
@@ -281,6 +320,8 @@ type ComposerProps = {
   submitting: boolean;
   submitError: string | null;
   onSend: () => void;
+  /** Pressing send goes to Clerk rather than writing a turn. */
+  needsAccount: boolean;
 };
 
 function Composer({
@@ -292,6 +333,7 @@ function Composer({
   submitting,
   submitError,
   onSend,
+  needsAccount,
 }: ComposerProps) {
   const canSend =
     !submitting && prompt.trim().length > 0 && selectedIds.length > 0;
@@ -330,7 +372,17 @@ function Composer({
           className="size-9 shrink-0"
           onClick={onSend}
           disabled={!canSend}
-          aria-label={submitting ? "Sending prompt" : "Send prompt"}
+          // The name says what the button actually does. For someone without
+          // an account that is not "send" — it opens a sign-in — and a button
+          // whose name promises one thing and does another is worse than a
+          // longer label.
+          aria-label={
+            needsAccount
+              ? "Sign in to send this prompt"
+              : submitting
+                ? "Sending prompt"
+                : "Send prompt"
+          }
         >
           <ArrowUp className="size-4" />
         </Button>

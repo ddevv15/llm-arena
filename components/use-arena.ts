@@ -16,13 +16,22 @@ import type { StoredAnswer, StoredTurn } from "@/lib/thread-view";
  */
 
 /**
- * `UNFINISHED` is client-only, and exists because the database can't tell the
- * difference between the two things `STREAMING` means. Live, it means a model
- * is typing right now. Loaded from a past thread, it means feature #6's known
- * gap happened — the tab closed mid-answer and that row was never settled.
- * Rendering a blinking cursor for the second one would be a lie.
+ * Two client-only statuses, both here because the database's three can't say
+ * what the screen needs to say.
+ *
+ * `UNFINISHED` exists because `STREAMING` means two different things. Live, it
+ * means a model is typing right now. Loaded from a past thread, it means
+ * feature #6's known gap happened — the tab closed mid-answer and that row was
+ * never settled. Rendering a blinking cursor for the second one would be a lie.
+ *
+ * `PENDING` is the same argument at the other end. Between pressing enter and
+ * `/api/turns` answering, the turn is on screen — that's feature #11's
+ * optimistic render — but no model has been asked yet, because the row it
+ * would be asked about doesn't exist. A cursor there would claim a model is
+ * typing during the ~1.8s it is provably not.
  */
-export type ArenaAnswerStatus = StoredAnswer["status"] | "UNFINISHED";
+export type ArenaAnswerStatus =
+  StoredAnswer["status"] | "UNFINISHED" | "PENDING";
 
 export type ArenaAnswer = Omit<StoredAnswer, "status"> & {
   readonly status: ArenaAnswerStatus;
@@ -47,14 +56,41 @@ type UseArenaOptions = {
   readonly onThreadCreated: (thread: { id: string; title: string }) => void;
 };
 
-const pendingAnswer = (id: string, model: string): ArenaAnswer => ({
+const blankAnswer = (
+  id: string,
+  model: string,
+  status: ArenaAnswerStatus,
+): ArenaAnswer => ({
   id,
   model,
-  status: "STREAMING",
+  status,
   content: "",
   ttft: null,
   tokensPerSecond: null,
   outputTokens: null,
+});
+
+/**
+ * The turn as it appears the instant enter is pressed, before the server has
+ * agreed it exists.
+ *
+ * It carries the real prompt and the real models, so when `/api/turns` returns
+ * ~1.8s later the only thing that changes is the ids — the columns don't
+ * reshuffle and nothing on screen moves. The id is thrown away at that point;
+ * it exists to find this turn again, whether to replace it or to remove it.
+ */
+const optimisticTurn = (
+  id: string,
+  prompt: string,
+  models: readonly FreeModelId[],
+): ArenaTurn => ({
+  id,
+  prompt,
+  voteAnswerId: null,
+  votePending: false,
+  answers: models.map((model) =>
+    blankAnswer(`${id}:${model}`, model, "PENDING"),
+  ),
 });
 
 /** A stored turn as the client should first see it — see `UNFINISHED` above. */
@@ -167,8 +203,35 @@ export function useArena({
         return;
       }
 
+      const placeholderId = `optimistic:${crypto.randomUUID()}`;
+
       setSubmitting(true);
       setSubmitError(null);
+
+      // Both of these used to happen after the fetch resolved, and that one
+      // detail is what made a ~1.8s wait read as a broken app rather than a
+      // slow one: the sent text sat in the box the whole time, so pressing
+      // enter looked like a dropped keypress. The Arcjet screen on the other
+      // end is a real 1.6s and is staying (feature #10), so the wait is not
+      // going away — what goes away is the screen lying about it.
+      setPrompt("");
+      setTurns((current) => [
+        ...current,
+        optimisticTurn(placeholderId, trimmedPrompt, models),
+      ]);
+
+      /** Put the screen back the way it was, for every path that fails. */
+      const rollBack = () => {
+        setTurns((current) =>
+          current.filter((turn) => turn.id !== placeholderId),
+        );
+        // Give the prompt back rather than losing someone's typing to a 503 —
+        // which the Phase 0 baseline measured at roughly one cold start in
+        // three. Only into a box they haven't since typed into themselves,
+        // though: clobbering a half-written second prompt would be a worse
+        // bug than the one this is fixing.
+        setPrompt((current) => (current.length > 0 ? current : trimmedPrompt));
+      };
 
       try {
         const response = await fetch("/api/turns", {
@@ -185,6 +248,7 @@ export function useArena({
           const body = (await response.json().catch(() => null)) as {
             error?: string;
           } | null;
+          rollBack();
           setSubmitError(
             body?.error ?? "That prompt couldn't be sent. Try again.",
           );
@@ -198,24 +262,28 @@ export function useArena({
           onThreadCreated({ id: data.threadId, title: data.threadTitle });
         }
 
-        setPrompt("");
-        setTurns((current) => [
-          ...current,
-          {
-            id: data.turnId,
-            prompt: trimmedPrompt,
-            answers: data.answers.map((answer) =>
-              pendingAnswer(answer.id, answer.model),
-            ),
-            voteAnswerId: null,
-            votePending: false,
-          },
-        ]);
+        // Replaced in place, not appended: the turn is already on screen and
+        // in the right position, and all that actually changes here is that
+        // its ids are now the database's rather than this client's.
+        setTurns((current) =>
+          current.map((turn) =>
+            turn.id !== placeholderId
+              ? turn
+              : {
+                  ...turn,
+                  id: data.turnId,
+                  answers: data.answers.map((answer) =>
+                    blankAnswer(answer.id, answer.model, "STREAMING"),
+                  ),
+                },
+          ),
+        );
 
         data.answers.forEach((answer) => {
           void streamAnswer(data.turnId, answer.id);
         });
       } catch {
+        rollBack();
         setSubmitError("That prompt couldn't be sent. Try again.");
       } finally {
         setSubmitting(false);
