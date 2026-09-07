@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Fraunces, Schibsted_Grotesk, IBM_Plex_Mono } from "next/font/google";
 import { ClerkProvider } from "@clerk/nextjs";
+import { Analytics } from "@vercel/analytics/next";
 import { IdentifyUser } from "@/components/identify-user";
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
@@ -43,6 +44,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <IdentifyUser />
             {children}
           </ThemeProvider>
+          <Analytics />
         </body>
       </html>
     </ClerkProvider>
