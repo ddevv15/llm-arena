@@ -140,6 +140,16 @@ Three things this pass found that are **not** fixed and are owed a decision:
 - **`outputTokens` is not the visible answer's token count.** It comes from the provider's `totalUsage.outputTokens`, which includes reasoning tokens, so Nemotron 3.5 Lightning reported `416` tokens for the one-word answer `blue` — and reported exactly `416` on both of its turns, which is suspicious enough to be worth a look on its own. `ttft` has the mirror problem: it only starts counting at the first `text-delta`, so a model that reasons first reads as 116 seconds to first token. Both numbers are honestly measured but they do not mean what the receipt labels say, which matters more here than in most products.
 - **No `onDelete: Cascade` anywhere in the schema.** Deleting a `Thread` fails on `Turn_threadId_fkey`; children have to be removed by hand, in order. Nothing needs this yet, but features #7 and #8 will. **Corrected after building #8: #8 does not need it.** Nothing in the app or anywhere in this scope actually deletes a thread — there is no delete control on any screen. What #8 needed was to _handle_ a thread that isn't there (the 404), which is a read concern, not a cascade. Adding the migration now would be adding a constraint no code path exercises. It becomes real the day a "delete thread" feature does, and not before.
 
+#### Fixed later: an errored answer could still report itself complete (2026-09-07)
+
+Found while verifying feature #13, and older than it. `lib/model-stream.ts` settles an answer as `ERROR` on an `error` or `abort` part but keeps reading the stream, so a `finish` part arriving afterwards still enqueued a `done` event. `settle()` was already idempotent, so the database recorded `ERROR` correctly — but the browser had been told the answer completed, patched its own state to `COMPLETE`, and rendered a receipt of dashes over an empty column instead of "This model didn't respond. Try again."
+
+The two halves agreed by accident: the database because of a guard, the wire because nothing normally sends both.
+
+Fixed by naming the invariant once and enforcing it in one place — **the first outcome wins, on the wire as well as in the database**. Every write now goes through an `emit()` that refuses to write after settlement, which also drops stray `chunk` parts arriving after a failure. Chosen over breaking out of the loop, which would stop draining a stream the SDK still wants to close cleanly.
+
+Verified by faking the one seam that cannot be produced on demand. A provider error mid-stream is not something a real call can be asked for, so `fullStream` was replaced with a hand-written sequence and everything downstream — settle path, SSE framing, guard — left as the real code. Seven checks across three sequences (error-then-finish, a clean finish as control, and chunks arriving after an error) all pass. The check was then re-run with the guard disabled to prove it was not vacuous: exactly two failed, the two the fix targets.
+
 ## Slice 2: App shell & thread history
 
 ### 7. App shell & thread history

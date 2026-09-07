@@ -69,13 +69,3 @@ The comment in `lib/arcjet.ts` used to add that it "stayed healthy throughout th
 **Why not now.** Nothing is broken for a reader. The read path fails open on purpose — feature #10 decided a shared link going dark because a security service blinked is worse than an unscreened page view — so the page still renders. What it costs is that a cold read goes unscreened, which is a weaker guarantee than the code's comment currently claims. Raising the deadline is a one-line change, but picking the number wants production data rather than one local cold start, and that data is issue #1's job.
 
 **Done looks like.** Read-path decide latency from a deployed instance (issue #1 already has to collect it), then either a deadline sized against it the way the write path's six seconds were, or a deliberate decision that failing open on a cold read is fine. The stale claim in the comment is already gone; what remains open is the number.
-
-## 7. An errored answer can still be marked complete on screen
-
-**What.** `lib/model-stream.ts` settles an answer as `ERROR` when it sees an `error` or `abort` part, but the loop keeps reading. If a `finish` part then arrives, the route still enqueues a `done` event. `settle()` is idempotent so the database correctly records `ERROR` — but the browser has already been told the answer completed, and patches its own state to `COMPLETE`.
-
-Seen live during feature #13's verification: a model returned nothing, the database recorded `status: ERROR` with every metric null, and the column on screen showed an expandable receipt reading `tokens/s 0.0` and `ttft —ms` above an empty answer. The receipt is honest about the numbers being absent; what is wrong is that a failed answer looks finished rather than failed, so it never shows "This model didn't respond. Try again."
-
-**Why not now.** It predates feature #13 and is not caused by it — #13 only made it visible, by giving the receipt a dash to print where there used to be a bare zero. The fix looks like one guard (stop emitting `done` once an error event has gone out), but it touches the settle path that feature #6 deliberately made idempotent, and getting it wrong in the other direction means an answer that really did complete gets marked failed. That deserves its own decision rather than being folded into an unrelated feature's verification.
-
-**Done looks like.** A decision on whether the stream should stop reading entirely after an error part or merely stop emitting, then the guard, then a check that a genuine mid-stream provider error still renders the plain failure sentence — the case feature #6 verified with a real OpenRouter 429.

@@ -63,6 +63,28 @@ export const toModelSseResponse = (
       let content = "";
       let settled = false;
 
+      /**
+       * Write to the stream, unless this answer has already settled.
+       *
+       * The invariant, in one place: **the first outcome wins, on the wire as
+       * well as in the database.** `settle` was already idempotent, so an
+       * answer that errored and then received a `finish` part was stored
+       * correctly as `ERROR` — but the `done` event still went out, the client
+       * patched itself to `COMPLETE`, and a failed answer rendered a receipt
+       * full of dashes instead of "This model didn't respond." The two halves
+       * agreed by accident and disagreed here.
+       *
+       * Guarding the writes rather than breaking out of the loop keeps the
+       * stream draining to its natural end, which is what lets the SDK close
+       * it cleanly.
+       */
+      const emit = (event: string, data: unknown) => {
+        if (settled) {
+          return;
+        }
+        controller.enqueue(encoder.encode(sseEvent(event, data)));
+      };
+
       const settle = async (outcome: StreamSettledOutcome) => {
         if (settled) {
           return;
@@ -89,13 +111,9 @@ export const toModelSseResponse = (
             firstOutputAt ??= now;
             firstTextAt ??= now;
             content += part.text;
-            controller.enqueue(
-              encoder.encode(sseEvent("chunk", { text: part.text })),
-            );
+            emit("chunk", { text: part.text });
           } else if (part.type === "error" || part.type === "abort") {
-            controller.enqueue(
-              encoder.encode(sseEvent("error", { message: FAILURE_MESSAGE })),
-            );
+            emit("error", { message: FAILURE_MESSAGE });
             await settle({ status: "ERROR" });
           } else if (part.type === "finish") {
             const finishAt = performance.now();
@@ -128,14 +146,12 @@ export const toModelSseResponse = (
               tokensPerSecond,
             };
 
-            controller.enqueue(encoder.encode(sseEvent("done", metrics)));
+            emit("done", metrics);
             await settle({ status: "COMPLETE", content, ...metrics });
           }
         }
       } catch {
-        controller.enqueue(
-          encoder.encode(sseEvent("error", { message: FAILURE_MESSAGE })),
-        );
+        emit("error", { message: FAILURE_MESSAGE });
         await settle({ status: "ERROR" });
       } finally {
         await settle({ status: "ERROR" });
