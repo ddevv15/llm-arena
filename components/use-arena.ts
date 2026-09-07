@@ -66,8 +66,11 @@ const blankAnswer = (
   status,
   content: "",
   ttft: null,
+  ttfo: null,
   tokensPerSecond: null,
   outputTokens: null,
+  textTokens: null,
+  reasoningTokens: null,
 });
 
 /**
@@ -176,14 +179,20 @@ export function useArena({
           } else if (message.event === "done") {
             const data = message.data as {
               outputTokens: number;
+              textTokens: number | null;
+              reasoningTokens: number | null;
               ttft: number | null;
+              ttfo: number | null;
               tokensPerSecond: number;
             };
             patchAnswer(turnId, answerId, {
               status: "COMPLETE",
               ttft: data.ttft,
+              ttfo: data.ttfo,
               tokensPerSecond: data.tokensPerSecond,
               outputTokens: data.outputTokens,
+              textTokens: data.textTokens,
+              reasoningTokens: data.reasoningTokens,
             });
           } else if (message.event === "error") {
             patchAnswer(turnId, answerId, { status: "ERROR" });

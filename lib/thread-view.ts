@@ -21,9 +21,19 @@ export type StoredAnswer = {
   readonly model: string;
   readonly status: AnswerStatus;
   readonly content: string;
+  /** Time to the first visible text delta. */
   readonly ttft: number | null;
+  /**
+   * Time to the first delta of any kind. Null on every answer written before
+   * feature #13, which is why the receipt asks whether it exists rather than
+   * assuming a number is there.
+   */
+  readonly ttfo: number | null;
   readonly tokensPerSecond: number | null;
+  /** The provider's total, reasoning included. */
   readonly outputTokens: number | null;
+  readonly textTokens: number | null;
+  readonly reasoningTokens: number | null;
 };
 
 export type StoredTurn = {

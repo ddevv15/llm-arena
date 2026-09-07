@@ -30,6 +30,7 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 | 10  | Abuse protection for public reads           | Slice 3    | done        |
 | 11  | Performance & responsiveness                | Slice 5    | in progress |
 | 12  | Browsing without an account                 | Slice 3    | done        |
+| 13  | Time to first token, made comparable        | Slice 6    | done        |
 
 Deliberately-open items live in `open-issues.md` at the repo root — things decided _not_ to fix yet, with the reason. This file stays the permanent record; that one is the queue.
 
@@ -470,6 +471,8 @@ Chosen over retrying the decide once, which pays roughly three seconds on the fa
 
 It matters more in production than the local numbers suggest: every cold serverless instance is a fresh process, so without this the sacrificial call is the first real prompt on that instance.
 
+**Correction, added the same day: this fix is real but not sufficient, and the model behind it was wrong.** Feature #13's verification hit the same 503 on a server whose warm-up had already absorbed a cold failure, minutes after boot, with the immediate retry succeeding. "First call in a fresh process" is falsified; the two probe runs behind it are equally consistent with an idle-driven or a roughly-one-in-ten stochastic failure. `open-issues.md` #5 is reopened with the evidence and the measurement that would settle it. The warm-up stays — it demonstrably absorbs the boot failure — but it is a partial mitigation, not the fix it was announced as.
+
 **Verified on a fresh production build.** The boot log reads `Arcjet prompt-injection rule warmed { absorbedTheColdFailure: true }` — the warm-up caught the failure, which is the log line doing its job. The first real prompt sent afterwards went through, streamed, and created its thread, with zero `errored on a turn write` in the log; before this, that exact first send reliably 503'd. The probe thread was deleted and row counts match the Phase 0 baseline. The log line reports `absorbedTheColdFailure` rather than staying silent so that if it ever starts reporting `false` on a cold boot, the workaround can be retired instead of quietly outliving the bug.
 
 #### Phase 2, measured first and then cut down — 2026-09-07
@@ -505,6 +508,64 @@ Dropped, with reasons rather than silence:
 Exactly 40 × 2 turns and 40 × 2 × 3 answers, which is the number the plan predicted and now does not happen. At sixty turns the same forty keystrokes would have been 2,400 and 7,200.
 
 `deriveWinRecords`' rewrite was checked against the previous implementation as an oracle: 4,000 randomised threads plus four hand-written edge cases (empty thread, turn with no answers, a vote pointing at no answer, one model appearing twice in a turn), **zero mismatches**. That matters more than usual because the old version's dedupe-within-a-turn behaviour is subtle and easy to get wrong when flattening two reduces into one.
+
+## Slice 6: Honest measurement
+
+### 13. Time to first token, made comparable
+
+Feature #6 recorded two numbers as wrong in a specific way, and feature #9 acted on it by shipping the leaderboard with no speed column and saying so on the page. Both were right to. What neither checked is whether the provider offered anything better.
+
+It does. Reading the installed `ai@7` types rather than assuming:
+
+- **`reasoning-delta` is a `fullStream` part type**, alongside `reasoning-start` and `reasoning-end`. `lib/model-stream.ts` only ever matches `text-delta`, which is precisely why a model that reasons first appears to take 116 seconds to its first token — the clock was running through the entire reasoning phase with nothing to stop it.
+- **`totalUsage.outputTokenDetails` splits `textTokens` from `reasoningTokens`.** The 416-tokens-for-the-word-"blue" number is the conflated total; the breakdown was available the whole time.
+
+So the standing note that these are "honestly measured but do not mean what the receipt labels say" describes a reading limitation, not a measurement one. Worth saying plainly, because the conclusion drawn from it — that the leaderboard cannot have a speed column — was a larger decision than the evidence supported.
+
+**Decided, after asking: record both times, not one.** A single number cannot be both comparable and true to the reader.
+
+- **Time to first output** — the first delta of any kind, reasoning or text. This is the comparable one, and the one a leaderboard could eventually rank on, because it measures the same thing for a model that reasons and a model that doesn't.
+- **Time to first text** — the first visible delta. This is what a person actually waits for, and it stays exactly as `ttft` means today.
+
+Keeping only the first would let a receipt claim 380ms while the reader stared at an empty panel for two minutes. Keeping only the second leaves the two kinds of model incomparable and the leaderboard column permanently unshippable. The receipt has room for both, and dotted leaders are what it is for.
+
+Decided without asking, since each follows:
+
+- **The migration is purely additive, and no existing column changes meaning.** `ttft` already means first-visible-text and continues to; `outputTokens` already means the provider's total and continues to. New nullable columns carry the new facts. This matters more than it sounds: redefining a column in place would silently reinterpret the 26 answers already on disk, and every comparison against them would be quietly wrong rather than visibly missing.
+- **The thinking line is omitted when there is nothing to report.** A model that never reasoned should not print a row saying so; an absent row is the honest rendering of an absent phase.
+- **`tokensPerSecond` keeps counting total output over wall clock.** It is throughput of work done, reasoning included, and that is the fair cross-model reading. What changes is that the receipt can now say what is in it.
+- **The leaderboard's speed column is not part of this.** This feature makes the numbers trustworthy; deciding how to average them, what minimum sample a speed ranking needs, and whether it ranks on first-output belongs to feature #9's column and gets its own pass. Unblocking it is the point, shipping it is not the same job.
+
+**The one real risk, and it is not resolvable by reading.** Whether OpenRouter's free models actually populate `reasoning-delta` and `outputTokenDetails` is a provider question. If they arrive empty the new fields are null, the receipt omits the rows, and nothing regresses — but the feature would have bought nothing, and that outcome has to be reported rather than papered over. It is the first thing to check against a real reasoning model.
+
+- [x] Decide the approach
+- [x] Build it
+
+#### As built, verified 2026-09-07
+
+`lib/model-stream.ts` runs two clocks: `firstOutputAt` stops on the first `reasoning-delta` _or_ `text-delta`, `firstTextAt` only on text. Reasoning deltas are counted but never appended to `content` or forwarded to the browser — they are the model thinking, not its answer. The `finish` part now also reads `totalUsage.outputTokenDetails`, defensively, because that is a provider field arriving over the wire and a provider that omits the breakdown must leave the rows blank rather than report zero, which would read as "did not reason" instead of "did not say".
+
+The migration is three nullable columns and touches nothing existing, exactly as planned:
+
+```sql
+ALTER TABLE "ModelAnswer" ADD COLUMN "reasoningTokens" INTEGER,
+ADD COLUMN "textTokens" INTEGER, ADD COLUMN "ttfo" DOUBLE PRECISION;
+```
+
+`receiptRows` in `components/arena.tsx` decides which rows exist per answer: a model that reasoned prints `thinking` and `first text`, one that didn't prints the single `ttft` it always had. Same for tokens — the split appears only when there were reasoning tokens to split off.
+
+**The provider question the plan flagged as unresolvable by reading is answered, and the answer is yes.** Probed directly against two real models:
+
+| Model                              | reasoning parts | `outputTokenDetails`                    | first output → first text |
+| ---------------------------------- | --------------- | --------------------------------------- | ------------------------- |
+| `nemotron-3-nano-omni-…-reasoning` | 49 deltas       | `{textTokens: 34, reasoningTokens: 21}` | 727ms → 1545ms            |
+| `minimax-m3`                       | none            | `{textTokens: 8, reasoningTokens: 0}`   | 1418ms → 1418ms           |
+
+**Then end to end in the browser, and this is the number that justifies the feature.** Nemotron 3.5 Lightning — not even the model named "reasoning" — answered with `thinking 619ms` and `first text 16767ms`. A **27× gap**. Under the old code that model reported "16,767ms to first token", which is what feature #6 saw and what feature #9 correctly refused to rank on. It had actually started work in 619ms. MiniMax M3 on the same turn showed a single `ttft 1550ms` row, because its two clocks are the same instant.
+
+Persisted values confirm the arithmetic holds: `outputTokens 480 = textTokens 268 + reasoningTokens 212`.
+
+**The leaderboard's speed column is now unblocked and deliberately not built.** Deciding what it averages, what minimum sample it needs, and whether it ranks on first-output is feature #9's column and deserves its own pass.
 
 ## Not doing right now
 

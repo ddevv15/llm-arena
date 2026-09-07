@@ -55,10 +55,18 @@ enum AnswerStatus {
   ERROR
 }
 
-// One model's answer within a turn. `ttft` / `tokensPerSecond` /
-// `outputTokens` mirror what `lib/model-stream.ts` already computes per call
-// (feature #1); persisting them here is what the leaderboard (feature #9)
-// will aggregate.
+// One model's answer within a turn. These mirror what `lib/model-stream.ts`
+// computes per call; persisting them is what a leaderboard speed column would
+// eventually aggregate.
+//
+// Feature #13 added `ttfo`, `textTokens` and `reasoningTokens` rather than
+// changing what the three original columns mean. `ttft` has always been time
+// to the first *visible* delta and still is; `outputTokens` has always been
+// the provider's total with reasoning folded in and still is. Redefining
+// either in place would have silently reinterpreted every row already on
+// disk — the numbers would have looked fine and meant something else. Older
+// rows simply have null in the new columns, which reads as "not measured"
+// rather than as zero.
 model ModelAnswer {
   id              String       @id @default(cuid())
   turnId          String
@@ -66,9 +74,17 @@ model ModelAnswer {
   model           String
   status          AnswerStatus @default(STREAMING)
   content         String       @default("")
+  // Time to the first visible text delta.
   ttft            Float?
+  // Time to the first delta of any kind, reasoning included. The comparable one.
+  ttfo            Float?
   tokensPerSecond Float?
+  // The provider's total output, reasoning included.
   outputTokens    Int?
+  // The answer alone, and the thinking alone. Null when a provider does not
+  // break the total down, which is different from it having reasoned zero.
+  textTokens      Int?
+  reasoningTokens Int?
   createdAt       DateTime     @default(now())
   wonVote         Vote?
 

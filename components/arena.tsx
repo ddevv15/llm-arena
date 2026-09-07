@@ -55,6 +55,50 @@ type ArenaProps = {
 const humanNumber = (value: number | null, digits = 0) =>
   value === null ? "—" : value.toFixed(digits);
 
+const ms = (value: number | null) => `${humanNumber(value)}ms`;
+
+/**
+ * What the receipt prints under a finished answer.
+ *
+ * Built rather than written inline because which rows exist genuinely depends
+ * on the answer. A model that reasoned before speaking has two different times
+ * worth knowing and a token count worth splitting; a model that answered
+ * straight away has one of each, and printing empty rows for the rest would
+ * describe a phase that never happened.
+ *
+ * `thinking` is the time to the first output of any kind and `first text` the
+ * time to the first visible one — the pair feature #13 exists to separate. On
+ * a model that never reasoned they are the same instant, so only one row
+ * prints, keeping the old label rather than inventing a distinction the reader
+ * doesn't need.
+ *
+ * Answers written before #13 have `ttfo` null. That means "not measured"
+ * rather than zero, and an absent row says so more honestly than a dash.
+ */
+function receiptRows(answer: ArenaAnswer) {
+  const reasoned =
+    answer.ttfo !== null && answer.ttft !== null && answer.ttfo < answer.ttft;
+
+  return [
+    ...(reasoned
+      ? [
+          { label: "thinking", value: ms(answer.ttfo) },
+          { label: "first text", value: ms(answer.ttft) },
+        ]
+      : [{ label: "ttft", value: ms(answer.ttft) }]),
+    ...(answer.reasoningTokens !== null && answer.reasoningTokens > 0
+      ? [
+          { label: "text tokens", value: humanNumber(answer.textTokens) },
+          {
+            label: "reasoning tokens",
+            value: humanNumber(answer.reasoningTokens),
+          },
+        ]
+      : [{ label: "tokens", value: humanNumber(answer.outputTokens) }]),
+    { label: "cost", value: "$0.0000" },
+  ];
+}
+
 export function Arena({
   catalog,
   arena,
@@ -345,11 +389,7 @@ const AnswerColumn = memo(function AnswerColumn({
             label: "tokens/s",
             value: humanNumber(answer.tokensPerSecond, 1),
           }}
-          rows={[
-            { label: "ttft", value: `${humanNumber(answer.ttft)}ms` },
-            { label: "tokens", value: humanNumber(answer.outputTokens) },
-            { label: "cost", value: "$0.0000" },
-          ]}
+          rows={receiptRows(answer)}
         />
       ) : (
         // Keeps the ledger's footing rule running across every column, even

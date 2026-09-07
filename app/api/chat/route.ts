@@ -112,8 +112,11 @@ export async function POST(request: Request) {
                 status: "COMPLETE",
                 content: outcome.content,
                 ttft: outcome.ttft,
+                ttfo: outcome.ttfo,
                 tokensPerSecond: outcome.tokensPerSecond,
                 outputTokens: outcome.outputTokens,
+                textTokens: outcome.textTokens,
+                reasoningTokens: outcome.reasoningTokens,
               }
             : { status: "ERROR" },
       });
