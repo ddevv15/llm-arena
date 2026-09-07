@@ -595,6 +595,26 @@ Persisted values confirm the arithmetic holds: `outputTokens 480 = textTokens 26
 
 **The leaderboard's speed column is now unblocked and deliberately not built.** Deciding what it averages, what minimum sample it needs, and whether it ranks on first-output is feature #9's column and deserves its own pass.
 
+#### The region finding, 2026-09-07 — bigger than any code change in this feature
+
+Prompted by the owner asking whether the slowness was architectural rather than bad code. It was, and none of feature #11's phases would have found it, because every one of them was looking inside the process.
+
+Established with the CLIs rather than inferred:
+
+- **`vercel inspect` on the live production deployment reports every function in `iad1`** — Virginia, the default nobody picks on purpose.
+- **`x-vercel-id: bom1::iad1`** on a real request: it enters Vercel's edge in Mumbai and is carried to Virginia before any application code runs.
+- **The database is not in Virginia either.** A raw TCP connect to `db.prisma.io` measures 80–87ms from India, against 17–26ms for CDN-fronted controls (`clerk.com`, `iad1.vercel.com`) that terminate at the Mumbai PoP. A US-East endpoint would sit near 250ms from here. That places the database in Asia-Pacific, most plausibly Singapore.
+
+So the arrangement was the worst of the three available: users in India, database in Asia, and the code that talks to both sitting in Virginia. **Every one of the one-to-three queries a page makes was crossing the Pacific.**
+
+**This also corrects a number recorded above.** Phase 0's per-query cost of 86ms was measured from a laptop that is far closer to the database than the function is. It was a floor, not a ceiling — the production function's path to Postgres was longer than anything measured locally, and no amount of query tuning or index work would have touched it.
+
+Fixed with a three-line `vercel.json` pinning `regions: ["bom1"]`, confirmed by `vercel inspect` on the resulting build: every function now reports `[bom1]`.
+
+**Not yet measured, and honestly so.** Preview deployments sit behind Vercel SSO — the protection layer answers at the edge (`x-vercel-id: bom1::` with no second region, so the function is never invoked) — which means the before-and-after cannot be timed from outside without either disabling that protection or promoting to production. Both are the owner's call. The region change is verified by configuration and by the build's own function manifest; the improvement is not yet verified by a stopwatch.
+
+**Two follow-ups.** The Asia-Pacific placement is inferred from latency, not read from the Prisma console; if it is confirmed as Singapore, `sin1` may beat `bom1` outright, because queries outnumber requests one to three and putting the function beside its database can win even at the cost of ~30ms more to the reader. And Phase 4's re-measure should now be taken against a `bom1` deployment, since every number in the Phase 0 table was produced against a topology the app no longer has.
+
 ## Not doing right now
 
 Kept here so the plan stays honest about what's deliberately left out.
