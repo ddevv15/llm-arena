@@ -481,7 +481,25 @@ Chosen over retrying the decide once, which pays roughly three seconds on the fa
 
 It matters more in production than the local numbers suggest: every cold serverless instance is a fresh process, so without this the sacrificial call is the first real prompt on that instance.
 
-**Correction, added the same day: this fix is real but not sufficient, and the model behind it was wrong.** Feature #13's verification hit the same 503 on a server whose warm-up had already absorbed a cold failure, minutes after boot, with the immediate retry succeeding. "First call in a fresh process" is falsified; the two probe runs behind it are equally consistent with an idle-driven or a roughly-one-in-ten stochastic failure. `open-issues.md` #5 is reopened with the evidence and the measurement that would settle it. The warm-up stays — it demonstrably absorbs the boot failure — but it is a partial mitigation, not the fix it was announced as.
+#### Closed 2026-09-07, on a measurement rather than a theory
+
+Two theories were tried and both were wrong. A third measurement settled it by not needing one.
+
+The run: fifteen calls back to back with no idle, then six with ninety seconds of idle before each, after discarding the process's known-bad first call. **Zero failures in twenty-one.** That refutes stochastic — a fifteen-call burst would have shown one at anything like one in ten — and refutes idle-driven at ninety seconds. The only failure was the discarded call 0, which is now the third process in a row to fail exactly there and nowhere else across forty-two subsequent calls.
+
+That resurrects "first call per process", which feature #13 had already falsified with a failure on a warmed server minutes after boot. Reconciling them gives a sharper hypothesis — a failed call 0 _starts_ an initialisation rather than completing it, and whatever it establishes expires after some minutes, so ninety-second gaps were simply too short to catch. That remains unproven, and the honest label is under-powered rather than conclusive.
+
+**What is established is narrower than a cause and more useful: every observed failure was followed by a call that succeeded.** Three probe processes and one live browser retry, four for four. So `protectWrite` retries once and stops, which covers the failure whatever triggers it — cold process, expired initialisation, or the account-side limit below. Chasing the trigger further would not have changed the fix.
+
+The startup warm-up stays alongside it. It is not redundant: the retry makes the failure invisible but the caller still pays it, measured at 2,828ms against a warm 900ms, and the warm-up moves that cost off the first real prompt entirely. Two mechanisms doing different jobs — one removes the cost at boot, the other covers everything else.
+
+The route still fails closed if both attempts error, which is deliberately against Arcjet's own guidance that an errored decision means the SDK failed open and should be logged and allowed. Feature #10 established this as where a prompt enters the system. The retry is what makes that posture affordable rather than merely principled.
+
+**Verified** by calling `protectWrite` as the first Arcjet call in a fresh process — the one condition observed to fail. The first attempt errored and logged, the retry returned `conclusion: ALLOW` with `PROMPT_INJECTION_DETECTION:ALLOW`, so the rule genuinely ran rather than being skipped.
+
+**Context that arrived after the fact, from the owner: the Arcjet free trial is over.** That may well be the root cause the measurements could not name, and it sits awkwardly with the rule succeeding on forty-two consecutive calls, so it is recorded rather than concluded. It also raises something worth its own eye — a route that fails closed is a route whose availability is coupled to a paid entitlement staying live, which nobody chose deliberately. `open-issues.md` #8.
+
+**Correction, recorded when this was first closed too early: the warm-up alone was not sufficient, and the model behind it was wrong.** Feature #13's verification hit the same 503 on a server whose warm-up had already absorbed a cold failure, minutes after boot, with the immediate retry succeeding. "First call in a fresh process" is falsified; the two probe runs behind it are equally consistent with an idle-driven or a roughly-one-in-ten stochastic failure. `open-issues.md` #5 is reopened with the evidence and the measurement that would settle it. The warm-up stays — it demonstrably absorbs the boot failure — but it is a partial mitigation, not the fix it was announced as.
 
 **Verified on a fresh production build.** The boot log reads `Arcjet prompt-injection rule warmed { absorbedTheColdFailure: true }` — the warm-up caught the failure, which is the log line doing its job. The first real prompt sent afterwards went through, streamed, and created its thread, with zero `errored on a turn write` in the log; before this, that exact first send reliably 503'd. The probe thread was deleted and row counts match the Phase 0 baseline. The log line reports `absorbedTheColdFailure` rather than staying silent so that if it ever starts reporting `false` on a cold boot, the workaround can be retired instead of quietly outliving the bug.
 

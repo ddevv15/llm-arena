@@ -4,7 +4,7 @@ Things deliberately left open, with enough context to pick up cold. Each one say
 
 The first three came out of feature #10 (abuse protection for public reads); the rest came out of feature #11 (performance). See those sections of `scope.md` for the full reasoning.
 
-Numbers are stable — a closed item is deleted and the rest keep their numbering, so a reference to "#4" in a commit or a comment still means the same thing later. **#5 was closed and has been reopened**, with the evidence that reopened it.
+Numbers are stable — a closed item is deleted and the rest keep their numbering, so a reference to "#4" in a commit or a comment still means the same thing later. Numbers are never reused for a different problem.
 
 ## 1. Measure Arcjet decide latency in production, and watch the 429 / 403 rate
 
@@ -46,20 +46,6 @@ It is also not yet a live problem. Threads today are short enough that this is a
 
 **Done looks like.** First a number: the turn count at which the page actually gets slow, taken from real threads rather than assumed. Then a product decision — windowed with a control to load earlier, virtualised so the DOM stays small while the data doesn't, or capped with the full transcript behind an explicit request. `getThread` is already `cache()`-wrapped per request, so whichever shape wins only has to change the query and the component that renders it.
 
-## 5. Reopened: the prompt-injection failure is not one call per process
-
-**What.** `aj.protect()` on `/api/turns` errors with `Unable to detect prompt injection - contact Arcjet support` and the route fails closed, so the sender gets a 503.
-
-**This was closed on 2026-09-07 and reopened the same day.** The fix — `warmPromptInjectionRule`, a throwaway call awaited at startup from `instrumentation.ts` — is real and stays: the boot log reads `absorbedTheColdFailure: true`, and the first real prompt after a fresh boot went through where it had reliably failed before. That much is verified and reproducible.
-
-**But it is not sufficient, and the model behind it was wrong.** During feature #13's verification, on a server whose warm-up had already absorbed a cold failure, a real send a few minutes later still 503'd — and the immediate retry succeeded. One warm-up, one later failure, in the same process.
-
-So "the first call in a fresh process fails and every call after it succeeds" is falsified. The two probe runs that produced it (12 calls and 9 calls, each failing only on call 0) are consistent with something else: either the failure returns after an idle gap, or it is simply stochastic at roughly one call in ten and both runs happened to draw it first. The 90-second idle test that seemed to rule out the first explanation is weak evidence, because in that run three successful calls immediately preceded each gap.
-
-**Why not now.** Because the next step is a measurement, not a patch, and guessing again is exactly what produced a fix that was announced as complete and wasn't. Distinguishing the two explanations needs a run long enough to be conclusive — thirty or so calls at varied intervals, recording which fail and how long they idled first. Until that exists, any further change is another hypothesis dressed as a fix.
-
-**Done looks like.** That measurement, then a fix chosen against it. If it is idle-driven, a periodic keep-warm is the shape. If it is stochastic, a single bounded retry on this specific error is the shape, and the warm-up becomes redundant rather than wrong. Either way the failure is survivable today — Phase 1's rollback returns the prompt intact and the person can retry — which is why this is a queued measurement rather than an emergency.
-
 ## 6. The public read path's Arcjet deadline was never actually tested
 
 **What.** `ajPublic` keeps the SDK's default decide deadline (500ms in production, 1000ms in development), on the grounds that its rules are lighter than the write path's.
@@ -69,3 +55,13 @@ The comment in `lib/arcjet.ts` used to add that it "stayed healthy throughout th
 **Why not now.** Nothing is broken for a reader. The read path fails open on purpose — feature #10 decided a shared link going dark because a security service blinked is worse than an unscreened page view — so the page still renders. What it costs is that a cold read goes unscreened, which is a weaker guarantee than the code's comment currently claims. Raising the deadline is a one-line change, but picking the number wants production data rather than one local cold start, and that data is issue #1's job.
 
 **Done looks like.** Read-path decide latency from a deployed instance (issue #1 already has to collect it), then either a deadline sized against it the way the write path's six seconds were, or a deliberate decision that failing open on a cold read is fine. The stale claim in the comment is already gone; what remains open is the number.
+
+## 8. The Arcjet plan may have lapsed, and this route fails closed
+
+**What.** The owner reports that Arcjet's free trial is over and suspects some features are disabled at their end. That is a plausible root cause for the `Unable to detect prompt injection` errors chased through issue #5 — the message says to contact support, which is what an entitlement problem would say — though it does not fit cleanly, since the rule succeeded on 42 consecutive measured calls and reports `PROMPT_INJECTION_DETECTION:ALLOW` when it runs. Whatever the mix, it is account-side, not code-side.
+
+**Why this needs an eye rather than a shrug.** `/api/turns` fails closed by design (feature #10), so a rule that becomes _permanently_ unavailable does not degrade the arena — it stops it. Every send would error twice, exhaust the retry, and return a 503. Today the rule works nearly always and the retry covers the rest, so nothing is broken; the exposure is that the app's availability is coupled to a paid entitlement staying live, and nobody chose that consciously.
+
+**Why not now.** It is a billing and account question first, and the code already behaves sanely under it. Guessing at a code change while the account state is unknown is how issue #5 acquired two wrong theories.
+
+**Done looks like.** Confirming what the Arcjet plan actually covers now. Then a deliberate decision on the coupling, which is a real fork and should be asked rather than assumed: keep failing closed and accept that a lapsed plan is an outage; fail open specifically when the rule is _unavailable_ while still failing closed on a genuine timeout; or drop `detectPromptInjection` from the write path and screen prompts another way. The middle option is the one that quietly weakens a control, so it needs choosing rather than drifting into.

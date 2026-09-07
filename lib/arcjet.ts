@@ -165,6 +165,46 @@ export const protectPublicRead = cache(async function protectPublicRead() {
 });
 
 /**
+ * The write path's decision, with one retry when Arcjet reports an error.
+ *
+ * Built on a measurement rather than a theory, because two theories were
+ * already tried and both were wrong (`open-issues.md` #5 carries the history).
+ * What is actually established, across three separate processes and one live
+ * browser session, is narrower and more useful than a cause: **every observed
+ * failure was followed by a call that succeeded.** Four for four.
+ *
+ * So this retries once and stops. That covers the failure whatever triggers it
+ * — a cold process, an expired initialisation, or an account-side limit — which
+ * matters, because the trigger is not pinned down and a fix that depended on
+ * knowing it would be another guess.
+ *
+ * The route still fails closed if the retry errors too. Arcjet's own guidance
+ * is more permissive (an errored decision means the SDK failed open, so log and
+ * allow), and this deliberately does not take it: feature #10 established
+ * `/api/turns` as where a prompt enters the system. The retry is what makes
+ * that posture affordable rather than merely principled.
+ *
+ * One cost, small and stated: a retry spends a second token from the caller's
+ * bucket, so a failed decision costs two of twenty rather than one. At a refill
+ * of five per ten seconds that is not worth the complexity of trying to avoid.
+ */
+export async function protectWrite(
+  request: Request,
+  options: Parameters<typeof aj.protect>[1],
+) {
+  const first = await aj.protect(request, options);
+  if (!first.isErrored()) {
+    return first;
+  }
+
+  console.warn("Arcjet write decision errored, retrying once", {
+    message: first.reason.message,
+  });
+
+  return aj.protect(request, options);
+}
+
+/**
  * Spend the prompt-injection rule's broken first call at startup, so a person
  * never does.
  *

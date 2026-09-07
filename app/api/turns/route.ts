@@ -1,6 +1,6 @@
 import { auth } from "@clerk/nextjs/server";
 import { z } from "zod";
-import { aj } from "@/lib/arcjet";
+import { protectWrite } from "@/lib/arcjet";
 import { FREE_MODEL_IDS, type FreeModelId } from "@/lib/models";
 import { prisma } from "@/lib/prisma";
 
@@ -133,7 +133,7 @@ export async function POST(request: Request) {
 
   const { prompt, models, threadId } = parsed.data;
 
-  const decision = await aj.protect(request, {
+  const decision = await protectWrite(request, {
     userId,
     requested: 1,
     detectPromptInjectionMessage: prompt,
@@ -170,10 +170,11 @@ export async function POST(request: Request) {
   // silent pass, because it is where a prompt enters the system, gets written
   // down, and reaches a model. The public read page makes the opposite call.
   //
-  // The real defence against the silent case is upstream: `aj` is given a
-  // deadline long enough that ordinary latency never lands here. See the note
-  // on `WRITE_DECISION_TIMEOUT_MS` — before that, this branch was rejecting
-  // roughly half of all prompts on latency alone.
+  // Two things stand between ordinary trouble and this branch, and both were
+  // sized by measurement: `aj`'s six-second deadline, so ordinary latency never
+  // lands here, and `protectWrite`'s single retry, because every observed
+  // instance of the prompt-injection rule erroring was followed by a call that
+  // worked. Reaching this point now means Arcjet failed twice in a row.
   if (decision.isErrored()) {
     console.error("Arcjet decision errored on a turn write", {
       message: decision.reason.message,
