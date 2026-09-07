@@ -376,7 +376,7 @@ Phases run cheapest-perceived-win first, and each one reports its decision and s
 - [x] Decide the approach
 - [x] Phase 0 — baseline measured, server half. Numbers and the correction they force are below. The client half (Profiler commit counts) still needs a real browser with the extension.
 - [x] Phase 1 — make it feel instant. All seven items built and verified by hand in a real browser against a production build; results and the two findings they turned up are below.
-- [ ] Phase 2 — stop the arena re-rendering itself to death: `prompt` moved down into `Composer`, `React.memo` on the answer/turn/sidebar/top-bar components with stable handlers so the memos actually hold, one lookup `Map` instead of `catalog.find` per row, streamed chunks coalesced onto a ~50ms flush, and the two quadratic reducers rewritten to a single pass.
+- [x] Phase 2 — trimmed to prevention once measured, and three of its five items dropped. What shipped, what didn't, and the measurements that forced the change are below.
 - [ ] Phase 3 — server and data: one migration adding `Turn(threadId, createdAt)`, `ModelAnswer(turnId, model, status)` and `ModelAnswer(turnId, status)` and dropping the redundant `Thread(userId)`; the 6-turn history cap; `getGlobalLeaderboard` aggregated in SQL and cached behind a tag the vote route revalidates; the vote route's `P2002` race returning its intended 409 instead of a 500; the Prisma adapter built once.
 - [ ] Phase 4 — client bundle and third party: PostHog's session replay, heatmaps and autocapture set explicitly rather than inherited from a remote preset that can be flipped on without a code change, `posthog.init` deferred off the critical path, font preloading trimmed, and the whole thing re-measured against Phase 0.
 
@@ -471,6 +471,40 @@ Chosen over retrying the decide once, which pays roughly three seconds on the fa
 It matters more in production than the local numbers suggest: every cold serverless instance is a fresh process, so without this the sacrificial call is the first real prompt on that instance.
 
 **Verified on a fresh production build.** The boot log reads `Arcjet prompt-injection rule warmed { absorbedTheColdFailure: true }` — the warm-up caught the failure, which is the log line doing its job. The first real prompt sent afterwards went through, streamed, and created its thread, with zero `errored on a turn write` in the log; before this, that exact first send reliably 503'd. The probe thread was deleted and row counts match the Phase 0 baseline. The log line reports `absorbedTheColdFailure` rather than staying silent so that if it ever starts reporting `false` on a cold boot, the workaround can be retired instead of quietly outliving the bug.
+
+#### Phase 2, measured first and then cut down — 2026-09-07
+
+**The premise did not survive contact with a measurement.** This phase was written as "stop the arena re-rendering itself to death" and called the worst problem in the app. On a production build in a real browser:
+
+| Scenario                                         | Result                                                                    |
+| ------------------------------------------------ | ------------------------------------------------------------------------- |
+| 40 keystrokes, 2-turn thread                     | 0.5ms median, 0.9ms p95, 1.0ms max                                        |
+| 17.5s of three concurrent streams, 3-turn thread | **0 long tasks, 0 frames over 50ms**, frame gap 8.3ms median / 23.4ms max |
+
+Every reading behind the original plan is still factually true — `appendChunk` really does rebuild the whole `turns` array per token, and `deriveWinRecords` really did clone a `Map` per turn and again per model-per-turn. The work is real; at present sizes it is too small to feel. **This is the same trap Phase 0 caught with cause #4**, where "unbounded queries make the app slow" turned out to be a five-row scan, and the honest response is the same one: keep the items that are improvements at any size, drop the ones only a symptom would justify, and say which is which.
+
+Shipped, on prevention grounds:
+
+- **`React.memo` on `TurnPanel` and `AnswerColumn`.** Algorithmic rather than cosmetic: it turns "every token re-renders every turn in the thread" into "re-renders one". `AnswerColumn` also stopped taking `onVote={() => onVote(turn.id, answer.id)}` — a fresh closure per answer per render, which would have made the memo useless on exactly the components that hold the prose. It now takes `answerId` plus a handler that is stable for the whole turn.
+- **A lookup `Map` instead of `catalog.find` per row**, in `Arena`, `ThreadWorkspace` and the leaderboard. Keyed by plain `string`, not `FreeModelId` — caught by the typechecker, and correctly: a stored answer's `model` is whatever was written at the time and the allowlist can change under a thread already on disk, which is the same reason `StoredAnswer.model` is a plain string.
+- **`deriveWinRecords` in a single pass.** A sixty-turn thread across three models was cloning about a hundred and eighty maps per call, on every token.
+
+Dropped, with reasons rather than silence:
+
+- **Moving `prompt` into `Composer`** — it now fights two shipped features. Feature #12's sign-in restore and Phase 1's failed-send rollback both write the prompt from _outside_ the composer, so moving it down needs an imperative handle or a key-remount. Real complexity to save 0.5ms.
+- **Coalescing chunks onto a ~50ms flush** — there is no jank to remove, and it carries a real risk: a flush that fails to fire on settle or unmount silently truncates an answer. Not a trade worth making for an unmeasurable gain.
+- **`React.memo` on the sidebar** — already solved. Phase 1 moved the sidebar into the layout, so it is no longer in the arena's tree and does not re-render with arena state at all.
+
+**The memo was verified to actually hold, not assumed.** Render counters were compiled into `TurnPanel` and `AnswerColumn`, measured both ways, and removed again. Across 40 keystrokes on a 2-turn thread:
+
+|          | `TurnPanel` renders | `AnswerColumn` renders |
+| -------- | ------------------- | ---------------------- |
+| memo on  | **0**               | **0**                  |
+| memo off | 80                  | 240                    |
+
+Exactly 40 × 2 turns and 40 × 2 × 3 answers, which is the number the plan predicted and now does not happen. At sixty turns the same forty keystrokes would have been 2,400 and 7,200.
+
+`deriveWinRecords`' rewrite was checked against the previous implementation as an oracle: 4,000 randomised threads plus four hand-written edge cases (empty thread, turn with no answers, a vote pointing at no answer, one model appearing twice in a turn), **zero mismatches**. That matters more than usual because the old version's dedupe-within-a-turn behaviour is subtle and easy to get wrong when flattening two reduces into one.
 
 ## Not doing right now
 

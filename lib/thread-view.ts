@@ -89,30 +89,42 @@ type WinRecordSource = {
 export function deriveWinRecords(
   turns: readonly WinRecordSource[],
 ): WinRecord[] {
-  const wins = turns.reduce<ReadonlyMap<string, number>>((tally, turn) => {
-    const winner = turn.answers.find(
-      (answer) => answer.id === turn.voteAnswerId,
-    );
-    return winner
-      ? new Map(tally).set(winner.model, (tally.get(winner.model) ?? 0) + 1)
-      : tally;
-  }, new Map<string, number>());
+  // One pass, and the maps are built by mutation rather than replacement.
+  //
+  // The previous version was two reduces that each rebuilt a `Map` per step —
+  // one clone per turn for the wins, and one per model *per turn* for the
+  // denominators, so a sixty-turn thread across three models cloned about a
+  // hundred and eighty maps every call. It runs on every streamed token, since
+  // `turns` changes with each one.
+  //
+  // The mutation is safe and stays local: these three collections are created
+  // here, never escape, and the function is still pure from the outside. That
+  // is the exception `AGENTS.md` allows to the no-mutating-loops rule, and it
+  // is the whole reason to write it this way rather than for style.
+  const wins = new Map<string, number>();
+  const answered = new Map<string, number>();
+  const order: string[] = [];
 
-  // One turn counts once per model even if that model somehow has two rows in
-  // it, so the denominator can never exceed the number of turns.
-  const answered = turns.reduce<ReadonlyMap<string, number>>(
-    (tally, turn) =>
-      [...new Set(turn.answers.map((answer) => answer.model))].reduce(
-        (inner, model) =>
-          new Map(inner).set(model, (inner.get(model) ?? 0) + 1),
-        tally,
-      ),
-    new Map<string, number>(),
-  );
+  for (const turn of turns) {
+    // One turn counts once per model even if that model somehow has two rows
+    // in it, so the denominator can never exceed the number of turns.
+    const seenThisTurn = new Set<string>();
 
-  const seen = turns.flatMap((turn) => turn.answers.map((a) => a.model));
+    for (const answer of turn.answers) {
+      if (!answered.has(answer.model)) {
+        order.push(answer.model);
+      }
+      if (!seenThisTurn.has(answer.model)) {
+        seenThisTurn.add(answer.model);
+        answered.set(answer.model, (answered.get(answer.model) ?? 0) + 1);
+      }
+      if (answer.id === turn.voteAnswerId) {
+        wins.set(answer.model, (wins.get(answer.model) ?? 0) + 1);
+      }
+    }
+  }
 
-  return [...new Set(seen)].map((model) => ({
+  return order.map((model) => ({
     model,
     wins: wins.get(model) ?? 0,
     answered: answered.get(model) ?? 0,

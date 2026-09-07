@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback } from "react";
+import { memo, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { SignInButton, useClerk } from "@clerk/nextjs";
@@ -69,9 +69,24 @@ export function Arena({
 
   const canVote = viewer === "owner";
 
-  const modelName = useCallback(
-    (id: string) => catalog.find((model) => model.id === id)?.name ?? id,
+  // A lookup rather than a scan. This is called once per answer column, and
+  // every streamed token re-runs the render that calls it, so `find` made the
+  // per-token cost proportional to catalog size times columns for no reason.
+  // Keyed by plain `string`, not `FreeModelId`, and that is deliberate: a
+  // stored answer's `model` is whatever was written at the time, and the
+  // free-tier allowlist can change underneath a thread already on disk. Same
+  // reasoning as `StoredAnswer.model` in `lib/thread-view.ts`.
+  const namesById = useMemo(
+    () =>
+      new Map<string, string>(
+        catalog.map((model) => [model.id, model.name] as const),
+      ),
     [catalog],
+  );
+
+  const modelName = useCallback(
+    (id: string) => namesById.get(id) ?? id,
+    [namesById],
   );
 
   const send = () => {
@@ -162,7 +177,24 @@ type TurnPanelProps = {
   onVote: (turnId: string, answerId: string) => void;
 };
 
-function TurnPanel({ turn, modelName, canVote, onVote }: TurnPanelProps) {
+/**
+ * Memoised, and the props are shaped so the memo actually holds.
+ *
+ * `setTurns` maps over the array and returns the *same* turn object for every
+ * turn it didn't change, so during a stream only the turn being written to has
+ * a new identity. That turns the per-token cost from "re-render every turn in
+ * the thread" into "re-render one", which is the difference that grows with
+ * thread length.
+ *
+ * `modelName` and `onVote` are both `useCallback`-stable in `Arena`, so they
+ * don't defeat it. See `AnswerColumn` for the one that used to.
+ */
+const TurnPanel = memo(function TurnPanel({
+  turn,
+  modelName,
+  canVote,
+  onVote,
+}: TurnPanelProps) {
   const completedCount = turn.answers.filter(
     (answer) => answer.status === "COMPLETE",
   ).length;
@@ -170,6 +202,13 @@ function TurnPanel({ turn, modelName, canVote, onVote }: TurnPanelProps) {
   // what they don't get is the control that would cast one.
   const showVote =
     canVote && completedCount >= MIN_ANSWERED_TO_VOTE && !turn.voteAnswerId;
+
+  // One handler for the whole turn, stable across renders, so the columns'
+  // memo isn't defeated by a fresh closure per answer per render.
+  const voteInThisTurn = useCallback(
+    (answerId: string) => onVote(turn.id, answerId),
+    [onVote, turn.id],
+  );
 
   return (
     <div className="flex flex-col gap-4">
@@ -197,14 +236,15 @@ function TurnPanel({ turn, modelName, canVote, onVote }: TurnPanelProps) {
               isWinner={turn.voteAnswerId === answer.id}
               canVote={showVote}
               votePending={turn.votePending}
-              onVote={() => onVote(turn.id, answer.id)}
+              answerId={answer.id}
+              onVote={voteInThisTurn}
             />
           ))}
         </div>
       </div>
     </div>
   );
-}
+});
 
 type AnswerColumnProps = {
   answer: ArenaAnswer;
@@ -212,17 +252,26 @@ type AnswerColumnProps = {
   isWinner: boolean;
   canVote: boolean;
   votePending: boolean;
-  onVote: () => void;
+  answerId: string;
+  onVote: (answerId: string) => void;
 };
 
-function AnswerColumn({
+/**
+ * Also memoised. It used to be handed `onVote={() => onVote(turn.id,
+ * answer.id)}` — a brand-new closure on every render, which would have made
+ * the memo above useless on the columns. It now takes the id it needs and
+ * calls a handler that is stable for the whole turn.
+ */
+const AnswerColumn = memo(function AnswerColumn({
   answer,
   modelName,
   isWinner,
   canVote,
   votePending,
+  answerId,
   onVote,
 }: AnswerColumnProps) {
+  const vote = useCallback(() => onVote(answerId), [onVote, answerId]);
   return (
     <div
       className={cn(
@@ -253,7 +302,7 @@ function AnswerColumn({
             size="sm"
             className="h-6 shrink-0 px-2 text-xs"
             disabled={votePending}
-            onClick={onVote}
+            onClick={vote}
           >
             Pick<span className="sr-only"> {modelName} as the winner</span>
           </Button>
@@ -309,7 +358,7 @@ function AnswerColumn({
       )}
     </div>
   );
-}
+});
 
 type ComposerProps = {
   catalog: CatalogModel[];

@@ -32,9 +32,17 @@ export const metadata: Metadata = { title: "Leaderboard" };
  * rather than quietly omitting them.
  */
 
-/** Display name for a model id, falling back to the id itself. */
-function nameOf(catalog: readonly { id: string; name: string }[], id: string) {
-  return catalog.find((model) => model.id === id)?.name ?? id;
+/**
+ * Display names by model id, falling back to the id itself for a model that
+ * has since left the free tier — which is why raw ids can appear on the board.
+ *
+ * Built once per render rather than scanned per row: two boards times a row
+ * each times the catalog is a lot of comparisons for a lookup.
+ */
+function namesById(catalog: readonly { id: string; name: string }[]) {
+  return new Map<string, string>(
+    catalog.map((model) => [model.id, model.name] as const),
+  );
 }
 
 type BoardProps = {
@@ -46,6 +54,8 @@ type BoardProps = {
 
 function Board({ heading, board, catalog, empty }: BoardProps) {
   const hasAny = board.ranked.length > 0 || board.provisional.length > 0;
+  const names = namesById(catalog);
+  const nameOf = (id: string) => names.get(id) ?? id;
 
   return (
     <section className="flex flex-col gap-4">
@@ -61,7 +71,7 @@ function Board({ heading, board, catalog, empty }: BoardProps) {
                   key={row.model}
                   row={row}
                   rank={index + 1}
-                  name={nameOf(catalog, row.model)}
+                  name={nameOf(row.model)}
                   first={index === 0}
                 />
               ))}
@@ -84,7 +94,7 @@ function Board({ heading, board, catalog, empty }: BoardProps) {
                   <ProvisionalRow
                     key={row.model}
                     row={row}
-                    name={nameOf(catalog, row.model)}
+                    name={nameOf(row.model)}
                   />
                 ))}
               </ul>

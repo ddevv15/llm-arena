@@ -150,16 +150,28 @@ export function ThreadWorkspace({
     }
   }, [catalog, composerMode, setPrompt, thread]);
 
+  // Plain `string` keys — a stored answer's model may have left the free tier
+  // since it was written, so it is not narrowable to `FreeModelId`.
+  const namesById = useMemo(
+    () =>
+      new Map<string, string>(
+        catalog.map((model) => [model.id, model.name] as const),
+      ),
+    [catalog],
+  );
+
+  // Recomputed on every streamed token, since `turns` changes with each one —
+  // which is why both the lookup and `deriveWinRecords` itself are built for
+  // repetition rather than for a single call.
   const modelRecords = useMemo<ModelRecord[]>(() => {
-    const nameOf = (id: string) =>
-      catalog.find((model) => model.id === id)?.name ?? id;
+    const nameOf = (id: string) => namesById.get(id) ?? id;
 
     return deriveWinRecords(arena.turns).map((record) => ({
       name: nameOf(record.model),
       wins: record.wins,
       answered: record.answered,
     }));
-  }, [arena.turns, catalog]);
+  }, [arena.turns, namesById]);
 
   return (
     <>
